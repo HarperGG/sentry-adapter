@@ -81,6 +81,14 @@ func (w *Worker) process(ctx context.Context, j store.Job) {
 		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback type is not mapped"))
 		return
 	}
+	if strings.TrimSpace(f.TaskType) == "" || strings.TrimSpace(f.DatasetID) == "" {
+		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback task type or dataset ID is missing"))
+		return
+	}
+	if strings.TrimSpace(f.Message) == "" {
+		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback message is missing"))
+		return
+	}
 	card := cardFromFeedback(f, kind)
 	card, err = w.Teambition.Prepare(ctx, card)
 	if err != nil {
@@ -132,31 +140,28 @@ func classify(value string) string {
 	}
 }
 
-func title(issueTitle, feedbackType string) string {
+func title(taskType, datasetID, feedbackType string) string {
 	label := feedbackTypeLabel(feedbackType)
-	prefix := fmt.Sprintf("【Sentry】【%s】", label)
-	value := strings.Join(strings.Fields(issueTitle), " ")
-	if value == "" || strings.EqualFold(value, "User Feedback") ||
-		strings.EqualFold(value, "Feedback") || value == "用户反馈" {
-		return prefix
-	}
-	// Keep the complete title within the same 100-rune budget used previously.
-	remaining := 100 - len([]rune(prefix)) - 1
-	runes := []rune(value)
+	metadata := fmt.Sprintf("%s: %s", strings.Join(strings.Fields(taskType), " "),
+		strings.Join(strings.Fields(datasetID), " "))
+	suffix := "】 " + label
+	// Preserve the feedback type if long metadata reaches the adapter's 100-rune cap.
+	remaining := 100 - len([]rune("【"+suffix))
+	runes := []rune(metadata)
 	if len(runes) > remaining {
-		value = string(runes[:remaining-1]) + "…"
+		metadata = string(runes[:remaining-1]) + "…"
 	}
-	return prefix + " " + value
+	return "【" + metadata + suffix
 }
 
 func feedbackTypeLabel(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "platform_bug":
-		return "平台缺陷"
+		return "平台异常"
 	case "feature_gap":
-		return "功能缺失"
+		return "功能不符合预期"
 	case "suggestion":
-		return "建议"
+		return "使用建议"
 	case "other":
 		return "其他"
 	case "bug", "defect":
@@ -171,8 +176,8 @@ func feedbackTypeLabel(value string) string {
 func cardFromFeedback(f sentry.Feedback, kind string) teambition.Card {
 	return teambition.Card{
 		SourceIssueID: f.IssueID,
-		Title:         title(f.Title, f.Kind),
-		Description:   strings.TrimSpace(f.IssueURL),
+		Title:         title(f.TaskType, f.DatasetID, f.Kind),
+		Description:   strings.TrimSpace(f.Message) + "\n\n" + strings.TrimSpace(f.IssueURL),
 		Kind:          kind,
 	}
 }

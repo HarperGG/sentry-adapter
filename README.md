@@ -8,7 +8,7 @@
 
 - `POST /webhooks/sentry/user-feedback`：对原始请求体验证 `Sentry-Hook-Signature`，过滤 `issue.created` 的 `FEEDBACK` 类别，也兼容 `event_alert.triggered`。当前 Sentry 配置使用的是前一种。
 - 先写 PostgreSQL 去重作业，再返回 `202`；后台 worker 只读取 Sentry Issue 和 Event，不查询或下载截图。
-- `content` 写入具体的 Sentry 反馈类型（如平台缺陷、功能缺失、建议），并附上非泛化的 Issue 标题；第一版 `note` 只写入这条反馈的 Sentry 链接。`platform_bug` / `feature_gap` 仍映射为缺陷，`suggestion` / `other` 映射为需求。
+- `content` 按 `【taskType: dataset_id】 反馈类型` 生成，反馈类型使用与 Sentry 页面一致的中文标签，例如 `【OD_correct: odc_0908-JGzm】 使用建议`。`note` 写入反馈原文、一个空行和这条反馈的 Sentry 链接；不处理图片。缺少分类、`taskType`、`dataset_id`、反馈正文或链接时，作业进入 `needs_review`，不调用 Teambition 建卡。
 - Teambition 客户端默认向私有 `https://teambition.gwm.cn/gateway/appToken` POST `appId`、`appSecret`，缓存返回的 `appToken`，作为 `Authorization: Bearer <appToken>` 调用 `/gateway/v3/task/create`；距过期不足 100 秒时重新获取。可配置 `TEAMBITION_AUTH_MODE=local_jwt`，沿用本地签发 HS256 JWT 的方式。建卡 body 包含 `involveMembers`、`objectType=task`、共用场景 ID 和配置的下拉自定义字段；只有拿到明确 task ID 才记为成功。
 - `mock` 模式不会写入 Teambition；真实模式第一版不调用截图上传接口，也不把截图放进任务的文件自定义字段。上传辅助代码保留供后续联调，当前业务链路不会使用。
 - 建卡请求发出后发生超时、5xx 或响应不完整时进入 `uncertain`，不会自动再次建卡。
@@ -46,14 +46,16 @@ config/credentials.env.example Teambition 应用凭据配置模板
 
 | Teambition 建卡字段                  | 来源                                                           |
 | ------------------------------------ | -------------------------------------------------------------- |
-| `content`                            | `【Sentry】【反馈类型】`，有明确的 Sentry Issue 标题时追加标题 |
-| `note`                               | 只放 Sentry 反馈链接                                           |
+| `content`                            | `【{taskType}: {dataset_id}】 {反馈类型}`；反馈类型使用与 Sentry UI 一致的中文标签 |
+| `note`                               | 反馈原文、空行、Sentry 反馈链接；不包含图片                    |
 | `projectId`、`scenariofieldconfigId` | `TEAMBITION_PROJECT_ID`、共用的 `TEAMBITION_SCENARIO_ID`       |
 | `involveMembers`                     | `[TEAMBITION_OPERATOR_ID]`                                     |
 | `objectType`                         | 固定为 `task`                                                  |
 | `customfields`                       | 配置的下拉字段与选项；第一版不加入截图文件字段                 |
 
 反馈深链接使用 Sentry Issue API 返回的项目 slug、项目数值 ID 和 Issue ID，构成 `.../organizations/{org}/issues/feedback/?feedbackSlug={projectSlug}:{issueId}&project={projectId}`。缺少这些字段时回退到 API permalink 或普通 Issue 地址。
+
+缺少分类、`taskType`、`dataset_id`、反馈正文或最终生成的反馈链接时，作业进入 `needs_review`，不会向 Teambition 发送建卡请求。
 
 ## 使用 Make 构建与验证
 

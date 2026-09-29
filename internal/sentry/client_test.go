@@ -75,7 +75,7 @@ func TestGetFeedbackUsesBusinessTypeTagInsteadOfContextType(t *testing.T) {
 		case "/api/0/organizations/acme/issues/42/":
 			_, _ = io.WriteString(w, `{"id":"42","issueCategory":"feedback","project":{"id":"5","slug":"web"}}`)
 		case "/api/0/organizations/acme/issues/42/events/oldest/":
-			_, _ = io.WriteString(w, `{"eventID":"event-1","contexts":{"feedback":{"type":"feedback","message":"test"}},"tags":[{"key":"feedback_type","value":"platform_bug"}]}`)
+			_, _ = io.WriteString(w, `{"eventID":"event-1","contexts":{"feedback":{"type":"feedback","message":"test"},"annotation_task":{"taskType":"OD_correct","datasetId":"context-dataset"},"feedback_details":{"dataset_id":"details-dataset"}},"tags":[{"key":"feedback_type","value":"platform_bug"},{"key":"dataset_id","value":"odc_0908-JGzm"}]}`)
 		default:
 			t.Errorf("unexpected request: %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -91,8 +91,36 @@ func TestGetFeedbackUsesBusinessTypeTagInsteadOfContextType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if feedback.Kind != "platform_bug" {
-		t.Fatalf("Kind = %q, want platform_bug", feedback.Kind)
+	if feedback.Kind != "platform_bug" || feedback.TaskType != "OD_correct" || feedback.DatasetID != "odc_0908-JGzm" {
+		t.Fatalf("feedback fields = %+v, want type, task, and dataset from Sentry event", feedback)
+	}
+}
+
+func TestGetFeedbackMetadataFallsBackToContextAndTag(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/0/organizations/acme/issues/42/":
+			_, _ = io.WriteString(w, `{"id":"42","issueCategory":"feedback","project":{"id":"5","slug":"web"}}`)
+		case "/api/0/organizations/acme/issues/42/events/oldest/":
+			_, _ = io.WriteString(w, `{"eventID":"event-1","contexts":{"feedback":{"type":"feedback","feedback_type":"suggestion","message":"test"},"feedback_details":{"dataset_id":"odc-fallback"}},"tags":[{"key":"task_type","value":"OD_correct"}]}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL, "sentry-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedback, err := client.GetFeedback(context.Background(), "acme", "42", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if feedback.Kind != "suggestion" || feedback.TaskType != "OD_correct" || feedback.DatasetID != "odc-fallback" {
+		t.Fatalf("feedback fields = %+v, want context and tag fallbacks", feedback)
 	}
 }
 

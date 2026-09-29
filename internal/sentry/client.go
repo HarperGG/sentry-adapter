@@ -40,6 +40,8 @@ type Feedback struct {
 	Title             string
 	Message           string
 	Kind              string
+	TaskType          string
+	DatasetID         string
 	IssueURL          string
 	Attachments       []Attachment
 }
@@ -112,14 +114,44 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 	if raw, ok := event.Contexts["feedback"]; ok {
 		_ = json.Unmarshal(raw, &details)
 	}
+	var annotationTask struct {
+		TaskType  string `json:"taskType"`
+		DatasetID string `json:"datasetId"`
+	}
+	if raw, ok := event.Contexts["annotation_task"]; ok {
+		_ = json.Unmarshal(raw, &annotationTask)
+	}
+	var feedbackDetails struct {
+		DatasetID string `json:"dataset_id"`
+	}
+	if raw, ok := event.Contexts["feedback_details"]; ok {
+		_ = json.Unmarshal(raw, &feedbackDetails)
+	}
 	kind := strings.TrimSpace(details.FeedbackType)
-	if kind == "" {
-		for _, tag := range event.Tags {
-			if tag.Key == "feedback_type" || tag.Key == "feedback.type" {
-				kind = strings.TrimSpace(tag.Value)
-				break
+	taskType := strings.TrimSpace(annotationTask.TaskType)
+	datasetID := ""
+	for _, tag := range event.Tags {
+		value := strings.TrimSpace(tag.Value)
+		switch tag.Key {
+		case "feedback_type", "feedback.type":
+			if kind == "" {
+				kind = value
+			}
+		case "task_type":
+			if taskType == "" {
+				taskType = value
+			}
+		case "dataset_id":
+			if datasetID == "" {
+				datasetID = value
 			}
 		}
+	}
+	if datasetID == "" {
+		datasetID = strings.TrimSpace(feedbackDetails.DatasetID)
+	}
+	if datasetID == "" {
+		datasetID = strings.TrimSpace(annotationTask.DatasetID)
 	}
 	// Context "type" normally identifies the Sentry context itself ("feedback"),
 	// not the application's feedback category. Keep legacy category values only.
@@ -130,6 +162,7 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 		IsFeedback: true,
 		IssueID:    issueID, EventID: eventID, Project: issue.Project.Slug,
 		Title: issue.Title, Message: details.Message, Kind: kind,
+		TaskType: taskType, DatasetID: datasetID,
 		IssueURL: c.feedbackURL(org, issueID, issue.Project.Slug, issue.Project.ID, issue.Permalink),
 	}
 	if eventID == "" || eventID == "oldest" {
