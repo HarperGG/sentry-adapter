@@ -74,6 +74,7 @@ func run(logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
+		logger.Info("Teambition client ready", "mode", "real", "auth_mode", cfg.TeambitionAuthMode)
 	}
 	w := &worker.Worker{Store: db, Sentry: sentryClient, Teambition: creator,
 		Organization: cfg.SentryOrg, Project: cfg.SentryProject,

@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 FROM golang:1.27.1-bookworm AS deps
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -13,13 +12,16 @@ FROM deps AS probe-build
 COPY cmd/teambition-probe ./cmd/teambition-probe
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -buildvcs=false -ldflags="-s -w" -o /teambition-probe ./cmd/teambition-probe
 
-FROM gcr.io/distroless/static-debian13:nonroot AS teambition-probe
+# Static Go binaries still need trusted roots for outbound HTTPS.
+FROM scratch AS teambition-probe
+COPY --from=deps /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=probe-build /teambition-probe /teambition-probe
-USER nonroot:nonroot
+USER 65532:65532
 ENTRYPOINT ["/teambition-probe"]
 
-FROM gcr.io/distroless/static-debian13:nonroot AS adapter
+FROM scratch AS adapter
+COPY --from=deps /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=adapter-build /adapter /adapter
 EXPOSE 8787
-USER nonroot:nonroot
+USER 65532:65532
 ENTRYPOINT ["/adapter"]

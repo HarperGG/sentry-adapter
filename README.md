@@ -109,7 +109,7 @@ cp config/credentials.env.example config/credentials.env
 install -d -m 0700 secrets
 ```
 
-编辑 `.env`：填入目标 `SENTRY_PROJECT` slug、Sentry 地址/组织和 Teambition 的租户、操作人、项目、共用场景、自定义字段 ID；CLB 直连时另设置 `ADAPTER_BIND_IP` 为节点内网 IP，不能填 CLB 地址。保持 `TEAMBITION_BASE_URL=https://teambition.gwm.cn`、`TEAMBITION_TOKEN_URL=https://teambition.gwm.cn/gateway/appToken`、`TEAMBITION_TASK_PATH=/gateway/v3/task/create`。`compose.real.yaml` 会把运行模式设为 `real`，即使 `.env` 示例中写着 `mock`。编辑 `config/credentials.env`，只在部署机填写企业内部应用的 AppID 和 AppSecret。第一版不需要截图相关配置。
+编辑 `.env`：填入目标 `SENTRY_PROJECT` slug、Sentry 地址/组织和 Teambition 的租户、操作人、项目、共用场景、自定义字段 ID；CLB 直连时另设置 `ADAPTER_BIND_IP` 为节点内网 IP，不能填 CLB 地址。保持 `TEAMBITION_AUTH_MODE=app_token`、`TEAMBITION_BASE_URL=https://teambition.gwm.cn`、`TEAMBITION_TOKEN_URL=https://teambition.gwm.cn/gateway/appToken`、`TEAMBITION_TASK_PATH=/gateway/v3/task/create`。运行模式由部署命令选择：`make deploy-real` 和 `make deploy-image` 使用真实 Teambition 接口，`make deploy-mock` 才使用模拟结果；不要在 `.env` 中设置 `TEAMBITION_MODE`，已有该行可删除。编辑 `config/credentials.env`，只在部署机填写企业内部应用的 AppID 和 AppSecret。第一版不需要截图相关配置。
 
 在 `secrets/` 下准备四个文件：`db_password`、`database_url`、`sentry_webhook_secret`、`sentry_auth_token`。数据库密码可用下面的命令生成；Sentry 的两个值请从已配置的 Integration 和 API Token 填入文件，勿粘贴到命令参数或版本库。`db` 是本 Compose 的数据库服务名，不是 Sentry 的数据库地址。
 
@@ -134,7 +134,7 @@ make deploy-image IMAGE=sentry-adapter:1.0.0
 make status
 ```
 
-`make deploy-image` 不重新编译镜像。也可用 `make deploy-real IMAGE=sentry-adapter:1.0.0` 一条命令完成构建和启动。后续改代码时使用新版本标签重新构建、部署；`make logs` 跟踪适配器日志，`make stop` 停止服务并保留数据库卷。若在另一台机器打镜像，打包时就使用完整仓库标签，例如 `make docker-build IMAGE=registry.example.com/team/sentry-adapter:1.0.0`，随后用同一 `IMAGE` 执行 `make docker-push`；在部署机执行 `docker pull registry.example.com/team/sentry-adapter:1.0.0` 和 `make deploy-image IMAGE=registry.example.com/team/sentry-adapter:1.0.0`。通过 CLB 部署时，健康检查和从 Sentry 容器到域名的测试命令见 [CLB 部署手册](docs/deploy-clb.md)。
+`make deploy-image` 不重新编译镜像。也可用 `make deploy-real IMAGE=sentry-adapter:1.0.0` 一条命令完成构建和启动。后续改代码时使用新版本标签重新构建、部署；`make logs` 跟踪适配器日志，`make stop` 停止服务并保留数据库卷。真实模式会在启动日志写入 `mode=real` 和 `auth_mode=app_token`；只在处理 Sentry 真实反馈时才调用 Teambition 建卡接口。若在另一台机器打镜像，打包时就使用完整仓库标签，例如 `make docker-build IMAGE=registry.example.com/team/sentry-adapter:1.0.0`，随后用同一 `IMAGE` 执行 `make docker-push`；在部署机执行 `docker pull registry.example.com/team/sentry-adapter:1.0.0` 和 `make deploy-image IMAGE=registry.example.com/team/sentry-adapter:1.0.0`。通过 CLB 部署时，健康检查和从 Sentry 容器到域名的测试命令见 [CLB 部署手册](docs/deploy-clb.md)。
 
 如果另行选择由宿主机上的 HTTPS 反向代理转发，把 `https://sentry-adapter.gwm-adas.com/webhooks/sentry/user-feedback` 代理到 `http://127.0.0.1:8787/webhooks/sentry/user-feedback`，并保留 `ADAPTER_BIND_IP=127.0.0.1`。如果代理运行在 Docker 容器里，它自己的 `127.0.0.1` 不能访问适配器。先找出代理容器所在的现有网络，然后用可选的 `compose.proxy.yaml` 把适配器接入该网络：
 
@@ -194,7 +194,7 @@ docker run --rm --network "container:${SENTRY_SENDER}" curlimages/curl:latest -i
 
 ### 分段检查网络路径
 
-Sentry 的 Webhook 发送容器必须能够访问实际配置的 Webhook URL；适配器容器还必须能够访问 `SENTRY_BASE_URL` 和私有 Teambition 网关。如果继续使用 `https://sentry-adapter.gwm-adas.com`，同机部署也可能遇到域名解析到宿主机公网地址后无法回流的问题。下面的临时 curl 容器共享目标容器的网络命名空间，不要求 distroless 适配器镜像内安装 curl：
+Sentry 的 Webhook 发送容器必须能够访问实际配置的 Webhook URL；适配器容器还必须能够访问 `SENTRY_BASE_URL` 和私有 Teambition 网关。如果继续使用 `https://sentry-adapter.gwm-adas.com`，同机部署也可能遇到域名解析到宿主机公网地址后无法回流的问题。下面的临时 curl 容器共享目标容器的网络命名空间，不要求精简的适配器运行镜像内安装 curl：
 
 ```bash
 # 在部署机执行；选实际负责发送 Webhook 的 Sentry 容器名

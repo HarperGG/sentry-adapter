@@ -54,7 +54,7 @@ chmod 0700 secrets
 chmod 0644 secrets/db_password secrets/database_url secrets/sentry_webhook_secret secrets/sentry_auth_token
 ```
 
-上述真实配置和 secrets 均不属于源码归档。Compose 的 `compose.real.yaml` 会把运行模式设为 `real` 并加载 `config/credentials.env`。
+上述真实配置和 secrets 均不属于源码归档。运行模式由 Compose 文件选择：`make deploy-real` 或 `make deploy-image` 会使用 `compose.real.yaml`，强制设为 `real` 并加载 `config/credentials.env`；旧版 `.env` 中的 `TEAMBITION_MODE=mock` 行可以删除，以免误解。保持 `TEAMBITION_AUTH_MODE=app_token`，使真实模式通过 `/gateway/appToken` 获取令牌。
 
 ## 3. 打镜像并启动
 
@@ -67,9 +67,13 @@ make teambition-check-docker
 make deploy-real IMAGE=sentry-adapter:1.0.0
 make status
 docker ps --format '{{.Names}} {{.Ports}}' | grep sentry-adapter
+ADAPTER_ID="$(docker compose -f compose.yaml -f compose.real.yaml ps -q adapter)"
+docker inspect --format '{{range .Config.Env}}{{if eq . "TEAMBITION_MODE=real"}}{{println "real"}}{{else if eq . "TEAMBITION_MODE=mock"}}{{println "mock"}}{{end}}{{end}}' "$ADAPTER_ID"
 ```
 
-`make deploy-real` 会检查 Compose 配置、构建镜像并后台启动 adapter 和它自己的 PostgreSQL。若镜像已在这台节点上构建或拉取，可用 `make deploy-image IMAGE=sentry-adapter:1.0.0` 启动而不重新构建。`make teambition-check-docker` 只检查私有 `/gateway/appToken`，不能代替真实建卡验证。容器端口映射应显示 `节点内网IP:8787->8787/tcp`。
+`make deploy-real` 会检查 Compose 配置、构建镜像并后台启动 adapter 和它自己的 PostgreSQL。若镜像已在这台节点上构建或拉取，可用 `make deploy-image IMAGE=sentry-adapter:1.0.0` 启动而不重新构建。上面的 `docker inspect` 应只输出 `real`，不显示凭据。`make teambition-check-docker` 只检查私有 `/gateway/appToken`，不能代替真实建卡验证。容器端口映射应显示 `节点内网IP:8787->8787/tcp`。
+
+Dockerfile 的两个运行阶段使用 `scratch`，并从 Go 构建阶段复制 CA 证书束；不再从 `gcr.io/distroless` 拉取运行镜像。构建仍需取得 Docker Hub 上的 Go 镜像、PostgreSQL 镜像和 Go 模块。`buildx isn't installed` 是 Compose Bake 的提示，不是 Teambition 探针结果；只有探针运行并打印 `gatewayStatus` 后，才表示实际调用了 `/gateway/appToken`。
 
 ## 4. 逐段验证
 

@@ -13,7 +13,7 @@
 - Go 1.27 的标准库 net/http、context、slog、http.Client 承担路由、超时和结构化日志。入口只有 webhook 与健康检查，暂不需要 Gin/Echo；[Go ServeMux](https://go.dev/blog/routing-enhancements/) 已支持按方法和路径注册。
 - PostgreSQL 17 与 pgx/v5 保存并领取持久作业。第一版只有 feedback_jobs 表，不依赖 Redis 或消息代理。
 - 同一个 Go 进程运行 HTTP server 与轮询 worker。Compose 部署 app 和 db，数据库使用持久卷；app 只把 8787 端口绑定到主机回环地址，预期由现有 HTTPS 反向代理转发。
-- [Docker 多阶段构建](https://docs.docker.com/build/building/best-practices/)编译静态 Go 二进制，运行层采用 distroless nonroot；Compose 通过 [db 健康检查与 depends_on](https://docs.docker.com/compose/how-tos/startup-order/)控制启动顺序。
+- [Docker 多阶段构建](https://docs.docker.com/build/building/best-practices/)编译静态 Go 二进制，运行层采用 `scratch`、数字非 root 用户和从构建镜像复制的 CA 证书束；Compose 通过 [db 健康检查与 depends_on](https://docs.docker.com/compose/how-tos/startup-order/)控制启动顺序。
 - Teambition 企业内部应用鉴权默认用 AppID、AppSecret 向私有 `POST /gateway/appToken` 换取应用 token，按接口返回的有效期缓存，并作为 Bearer Token 调用任务创建接口；同时保留用户提供的 Python 本地签发 HS256 JWT 方式，由 `TEAMBITION_AUTH_MODE` 选择。第一版只依赖取 token 和建卡两个 Teambition 接口；图片上传辅助代码保留供后续联调，不在当前业务链路执行。
 
 ~~~mermaid
