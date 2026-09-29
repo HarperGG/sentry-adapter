@@ -1,0 +1,19 @@
+services:
+  teambition-probe:
+    build:
+      context: .
+      target: teambition-probe
+    env_file:
+      - ./.env
+      - ./config/credentials.env
+    command:
+      - -env-file
+      - /dev/null
+      - -credentials-file
+      - /dev/null
+      - -once
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true

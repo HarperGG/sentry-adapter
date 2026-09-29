@@ -1,0 +1,140 @@
+openapi: 3.0.3
+info:
+  title: Teambition 接口连通性检查
+  version: 1.0.0
+  description: |
+    本地只读诊断接口，用于确认当前运行环境能否获取私有网关 appToken，
+    以及能否读取一条已存在的任务。检查不会创建或修改 Teambition 任务。
+    AppID、AppSecret、操作人和租户信息由服务端配置读取，不通过此页面输入。
+servers:
+  - url: /
+    description: 当前本机诊断服务（默认 http://127.0.0.1:8790）
+tags:
+  - name: 连通性检查
+    description: 只读探测；响应仅包含状态和耗时，不包含凭据、令牌或任务正文。
+paths:
+  /api/check/token:
+    post:
+      tags: [连通性检查]
+      summary: 检查 appToken 接口
+      description: |
+        服务端使用环境变量中的 AppID 和 AppSecret 请求私有网关的
+        POST /gateway/appToken。响应只说明是否取得令牌，不返回令牌值。
+      operationId: checkToken
+      responses:
+        '200':
+          description: 探测完成；网关调用成功或失败请查看 gatewayStatus、tokenReceived 和 category。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenCheckResult'
+        '400':
+          description: Token 检查不接受请求体。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeError'
+  /api/check/task-read:
+    post:
+      tags: [连通性检查]
+      summary: 检查已有任务读取接口
+      description: |
+        服务端先获取 appToken，再使用已存在的任务 ID 调用只读任务查询接口。
+        此操作不会创建任务。不要在这里填写任务标题或描述。
+      operationId: checkTaskRead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskReadRequest'
+            example:
+              taskId: replace-with-existing-task-id
+      responses:
+        '200':
+          description: 探测完成；请分别查看令牌和任务读取状态。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskReadCheckResult'
+        '400':
+          description: 缺少 taskId、任务 ID 格式无效或请求体格式错误。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeError'
+        '415':
+          description: 请求体必须是 application/json。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeError'
+components:
+  schemas:
+    TaskReadRequest:
+      type: object
+      additionalProperties: false
+      required: [taskId]
+      properties:
+        taskId:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9_-]+$'
+          description: 已存在的 Teambition 任务 ID。
+    TokenCheckResult:
+      type: object
+      description: 脱敏的 appToken 探测结果。
+      required: [gatewayStatus, tokenReceived, category, durationMs]
+      properties:
+        gatewayStatus:
+          type: integer
+          format: int32
+          description: 私有网关返回的 HTTP 状态码；未收到 HTTP 响应时为 0。
+          example: 200
+        tokenReceived:
+          type: boolean
+          description: 是否从网关响应中取得 appToken；不返回令牌本身。
+          example: true
+        expiresInSeconds:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 令牌有效期秒数；未取得时可能省略或为 0。
+          example: 1800
+        category:
+          type: string
+          description: 诊断分类，例如 ok、forbidden、unauthorized、timeout、dns_error 或 tls_error。
+          example: ok
+        durationMs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 完成该次探测所用的毫秒数。
+          example: 243
+    TaskReadCheckResult:
+      allOf:
+        - $ref: '#/components/schemas/TokenCheckResult'
+        - type: object
+          required: [taskCategory]
+          properties:
+            taskStatus:
+              type: integer
+              format: int32
+              description: 任务查询网关返回的 HTTP 状态码；未执行查询时该字段可能省略。
+              example: 200
+            taskCategory:
+              type: string
+              description: |
+                任务查询的诊断分类。令牌获取失败时为 not_attempted；网关返回
+                HTTP 2xx 后，仍可能因业务错误、找不到任务或响应无效而分别为
+                api_error、task_not_found、invalid_task_response。
+              example: ok
+    ProbeError:
+      type: object
+      description: 本地请求未能完成探测时的错误响应。服务端不会包含密钥或令牌。
+      required: [category]
+      properties:
+        category:
+          type: string
+          example: invalid_task_id
