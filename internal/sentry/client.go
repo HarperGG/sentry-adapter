@@ -112,17 +112,19 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 	if raw, ok := event.Contexts["feedback"]; ok {
 		_ = json.Unmarshal(raw, &details)
 	}
-	kind := details.FeedbackType
-	if kind == "" {
-		kind = details.Type
-	}
+	kind := strings.TrimSpace(details.FeedbackType)
 	if kind == "" {
 		for _, tag := range event.Tags {
 			if tag.Key == "feedback_type" || tag.Key == "feedback.type" {
-				kind = tag.Value
+				kind = strings.TrimSpace(tag.Value)
 				break
 			}
 		}
+	}
+	// Context "type" normally identifies the Sentry context itself ("feedback"),
+	// not the application's feedback category. Keep legacy category values only.
+	if kind == "" && !strings.EqualFold(strings.TrimSpace(details.Type), "feedback") {
+		kind = strings.TrimSpace(details.Type)
 	}
 	f := Feedback{
 		IsFeedback: true,

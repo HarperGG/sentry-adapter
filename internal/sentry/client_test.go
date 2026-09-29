@@ -68,6 +68,34 @@ func TestGetFeedbackReadsEventWithoutRequestingAttachments(t *testing.T) {
 	}
 }
 
+func TestGetFeedbackUsesBusinessTypeTagInsteadOfContextType(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/0/organizations/acme/issues/42/":
+			_, _ = io.WriteString(w, `{"id":"42","issueCategory":"feedback","project":{"id":"5","slug":"web"}}`)
+		case "/api/0/organizations/acme/issues/42/events/oldest/":
+			_, _ = io.WriteString(w, `{"eventID":"event-1","contexts":{"feedback":{"type":"feedback","message":"test"}},"tags":[{"key":"feedback_type","value":"platform_bug"}]}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	client, err := New(server.URL, "sentry-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	feedback, err := client.GetFeedback(context.Background(), "acme", "42", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if feedback.Kind != "platform_bug" {
+		t.Fatalf("Kind = %q, want platform_bug", feedback.Kind)
+	}
+}
+
 func TestGetFeedbackIgnoresNonFeedbackIssue(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
