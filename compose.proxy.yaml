@@ -1,0 +1,12 @@
+services:
+  adapter:
+    networks:
+      default: {}
+      sentry_proxy:
+        aliases:
+          - sentry-adapter
+
+networks:
+  sentry_proxy:
+    external: true
+    name: ${SENTRY_PROXY_NETWORK:?Set SENTRY_PROXY_NETWORK to the existing shared Docker network name}

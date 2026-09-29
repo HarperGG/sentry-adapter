@@ -1,0 +1,58 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: adapter
+      POSTGRES_USER: adapter
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U adapter -d adapter"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  adapter:
+    build: .
+    image: ${IMAGE:-sentry-adapter:local}
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      LISTEN_ADDR: :8787
+      TEAMBITION_MODE: mock
+      DATABASE_URL_FILE: /run/secrets/database_url
+      SENTRY_WEBHOOK_SECRET_FILE: /run/secrets/sentry_webhook_secret
+      SENTRY_AUTH_TOKEN_FILE: /run/secrets/sentry_auth_token
+    secrets:
+      - database_url
+      - sentry_webhook_secret
+      - sentry_auth_token
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${ADAPTER_BIND_IP:-127.0.0.1}:8787:8787"
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  database_url:
+    file: ./secrets/database_url
+  sentry_webhook_secret:
+    file: ./secrets/sentry_webhook_secret
+  sentry_auth_token:
+    file: ./secrets/sentry_auth_token
+
+volumes:
+  pgdata:

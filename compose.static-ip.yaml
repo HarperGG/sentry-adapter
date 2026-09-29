@@ -1,0 +1,5 @@
+services:
+  adapter:
+    networks:
+      sentry_proxy:
+        ipv4_address: ${SENTRY_ADAPTER_IPV4:?Set SENTRY_ADAPTER_IPV4 to an unused IP in SENTRY_PROXY_NETWORK}

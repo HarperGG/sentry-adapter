@@ -1,0 +1,7 @@
+services:
+  adapter:
+    env_file:
+      - ./.env
+      - ./config/credentials.env
+    environment:
+      TEAMBITION_MODE: real
