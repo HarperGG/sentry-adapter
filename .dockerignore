@@ -1,0 +1,11 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+docs
+README.md
+config/credentials.env
+secrets/
+dist/
+**/*_test.go
