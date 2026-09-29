@@ -44,14 +44,14 @@ config/credentials.env.example Teambition 应用凭据配置模板
 
 之前提供的任务 cURL 使用浏览器 Cookie 调用 `/api/v2/tasks`。现在以用户已调用成功的私有 `/gateway/appToken` 和 `/gateway/v3/task/create` 请求为准：已确认一个 `scenariofieldconfigId` 可供所有反馈共用，`involveMembers` 使用配置的操作人 ID，下拉 `customfields` 使用单独配置的字段与选项 ID。旧 cURL 中的任务列表、阶段、流程状态和执行人 ID 仍可配置，但本地 `.env` 已清空这些未经当前成功请求验证的可选值。第一版无需配置截图文件字段。
 
-| Teambition 建卡字段                  | 来源                                                           |
-| ------------------------------------ | -------------------------------------------------------------- |
+| Teambition 建卡字段                  | 来源                                                                               |
+| ------------------------------------ | ---------------------------------------------------------------------------------- |
 | `content`                            | `【{taskType}: {dataset_id}】 {反馈类型}`；反馈类型使用与 Sentry UI 一致的中文标签 |
-| `note`                               | 反馈原文、空行、Sentry 反馈链接；不包含图片                    |
-| `projectId`、`scenariofieldconfigId` | `TEAMBITION_PROJECT_ID`、共用的 `TEAMBITION_SCENARIO_ID`       |
-| `involveMembers`                     | `[TEAMBITION_OPERATOR_ID]`                                     |
-| `objectType`                         | 固定为 `task`                                                  |
-| `customfields`                       | 配置的下拉字段与选项；第一版不加入截图文件字段                 |
+| `note`                               | 反馈原文、空行、Sentry 反馈链接；不包含图片                                        |
+| `projectId`、`scenariofieldconfigId` | `TEAMBITION_PROJECT_ID`、共用的 `TEAMBITION_SCENARIO_ID`                           |
+| `involveMembers`                     | `[TEAMBITION_OPERATOR_ID]`                                                         |
+| `objectType`                         | 固定为 `task`                                                                      |
+| `customfields`                       | 配置的下拉字段与选项；第一版不加入截图文件字段                                     |
 
 反馈深链接使用 Sentry Issue API 返回的项目 slug、项目数值 ID 和 Issue ID，构成 `.../organizations/{org}/issues/feedback/?feedbackSlug={projectSlug}:{issueId}&project={projectId}`。缺少这些字段时回退到 API permalink 或普通 Issue 地址。
 
