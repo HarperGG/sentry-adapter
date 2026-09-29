@@ -73,7 +73,7 @@ docker inspect --format '{{range .Config.Env}}{{if eq . "TEAMBITION_MODE=real"}}
 
 `make deploy-real` 会检查 Compose 配置、构建镜像并后台启动 adapter 和它自己的 PostgreSQL。若镜像已在这台节点上构建或拉取，可用 `make deploy-image IMAGE=sentry-adapter:1.0.0` 启动而不重新构建。上面的 `docker inspect` 应只输出 `real`，不显示凭据。`make teambition-check-docker` 只检查私有 `/gateway/appToken`，不能代替真实建卡验证。容器端口映射应显示 `节点内网IP:8787->8787/tcp`。
 
-Dockerfile 的两个运行阶段使用 `scratch`，并从 Go 构建阶段复制 CA 证书束；不再从 `gcr.io/distroless` 拉取运行镜像。构建仍需取得 Docker Hub 上的 Go 镜像、PostgreSQL 镜像和 Go 模块。`buildx isn't installed` 是 Compose Bake 的提示，不是 Teambition 探针结果；只有探针运行并打印 `gatewayStatus` 后，才表示实际调用了 `/gateway/appToken`。
+Dockerfile 的两个运行阶段使用 `scratch`，并从 Go 构建阶段复制 CA 证书束；不再从 `gcr.io/distroless` 拉取运行镜像。构建阶段改用体积较小的官方 `golang:1.27.1-alpine3.24`，仍需从 Docker Hub 取得这个镜像、PostgreSQL 镜像和 Go 模块。无需事先手动 `docker pull` Go 镜像，Docker 构建时会自动拉取。`buildx isn't installed` 是 Compose Bake 的提示，不是 Teambition 探针结果；只有探针运行并打印 `gatewayStatus` 后，才表示实际调用了 `/gateway/appToken`。
 
 ## 4. 逐段验证
 
