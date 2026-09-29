@@ -86,7 +86,7 @@ swagger:
 	"$(GO)" run ./cmd/teambition-probe -env-file .env -credentials-file config/credentials.env -listen 127.0.0.1:8790
 
 docker-build:
-	"$(DOCKER)" build --tag "$(IMAGE)" .
+	"$(DOCKER)" build $(if $(strip $(GOPROXY)),--build-arg GOPROXY,) --tag "$(IMAGE)" .
 
 docker-push:
 	$(if $(filter sentry-adapter:local,$(IMAGE)),$(error Set IMAGE to a tagged registry image before pushing))

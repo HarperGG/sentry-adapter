@@ -84,6 +84,8 @@ make swagger
 
 要检查 **Docker 容器内**的出站网络，可运行 `make teambition-check-docker`。它在独立的 Compose 诊断容器里执行一次 token 检查，不开放端口，也不需要先启动数据库或适配器。两次检查分别验证主机与容器的网络路径；容器命令仍只输出脱敏状态。若部署时使用了自定义 Compose 项目名，运行诊断命令时设置相同的 `COMPOSE_PROJECT_NAME`，以加入同名项目网络。
 
+Docker 构建阶段默认从 `https://goproxy.cn` 下载 Go 模块，以避开部分节点访问 `proxy.golang.org` 的超时。`go.sum` 和 Go 校验数据库仍用于校验依赖。若需使用企业模块代理，可在执行 Make 命令时设置 `GOPROXY`，例如 `GOPROXY=https://内部模块代理 make teambition-check-docker`；`make docker-build` 与 `make deploy-real` 也支持这个变量。此设置只影响镜像构建，不改变运行时对 Teambition 的请求。
+
 第一条命令只检查 `POST /gateway/appToken`，输出 HTTP 状态、分类及 token 有效期，不输出 token 或凭据。第二条命令启动只监听本机的 Swagger UI，打开 [http://127.0.0.1:8790/swagger/](http://127.0.0.1:8790/swagger/)，在页面中执行 **检查 appToken 接口**。Swagger 调用本地诊断服务，由服务端携带凭据请求 Teambition，浏览器不直接向私有网关发送密钥。如果有一条已存在的 Teambition 任务 ID，还可以执行 **检查已有任务读取接口**；它先取 token，再调用只读的 `GET /gateway/v3/task/query?taskId=...`，不会创建任务。[Teambition 任务查询接口](https://open.teambition.com/docs/apis/6321c6d2912d20d3b5a4a7b8)是该检查的协议依据。
 
 | 探针结果                                                          | 含义                                                                            |

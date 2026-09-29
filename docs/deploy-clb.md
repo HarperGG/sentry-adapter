@@ -75,6 +75,8 @@ docker inspect --format '{{range .Config.Env}}{{if eq . "TEAMBITION_MODE=real"}}
 
 Dockerfile 的两个运行阶段使用 `scratch`，并从 Go 构建阶段复制 CA 证书束；不再从 `gcr.io/distroless` 拉取运行镜像。构建阶段改用体积较小的官方 `golang:1.27.1-alpine3.24`，仍需从 Docker Hub 取得这个镜像、PostgreSQL 镜像和 Go 模块。无需事先手动 `docker pull` Go 镜像，Docker 构建时会自动拉取。`buildx isn't installed` 是 Compose Bake 的提示，不是 Teambition 探针结果；只有探针运行并打印 `gatewayStatus` 后，才表示实际调用了 `/gateway/appToken`。
 
+若构建卡在 `RUN go mod download` 并显示 `proxy.golang.org` 超时，说明尚未运行探针。构建阶段默认使用 `https://goproxy.cn` 获取 Go 模块，保留 Go 的 `go.sum` 和校验数据库检查。可在节点用 `GOPROXY=https://企业模块代理地址 make teambition-check-docker` 和 `GOPROXY=https://企业模块代理地址 make docker-build IMAGE=sentry-adapter:1.0.0` 覆盖构建代理；`make deploy-real` 同样接受这个环境变量。不要将 `GOSUMDB` 设为 `off`。
+
 ## 4. 逐段验证
 
 把下面的 `NODE_IP` 改成 `.env` 中的 `ADAPTER_BIND_IP`，`ADAPTER_DOMAIN` 改成已绑定到 CLB 的实际域名。如果域名是 `sentry-adapter.gwm-adas.com`，可直接使用示例值。

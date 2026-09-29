@@ -3,6 +3,8 @@ services:
     build:
       context: .
       target: teambition-probe
+      args:
+        GOPROXY: ${GOPROXY:-https://goproxy.cn}
     env_file:
       - ./.env
       - ./config/credentials.env
