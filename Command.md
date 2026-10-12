@@ -13,7 +13,10 @@ docker compose -f compose.yaml exec -T db \
 ## 构建image
 
 ```bash
-make deploy-image IMAGE=sentry-adapter:1.0.0
+make docker-build IMAGE=sentry-adapter:1.0.1
+make stop
+make deploy-image IMAGE=sentry-adapter:1.0.1
+make status
 ```
 
 ## 报错： ✘ Container sentry-adapter-db-1 Error response from daemon: invalid mount config for type "bind": bind source path does not exist: /data/sentry-adapter/secrets/db_password
