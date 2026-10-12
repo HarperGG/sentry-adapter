@@ -4,7 +4,7 @@
 
 ## 1. 目标与边界
 
-服务接收自建 Sentry 的 Issue webhook，从指定组织和项目读取 User Feedback 的 Issue、Event，在固定的 Teambition 项目创建一张需求或缺陷任务。第一版不查询、下载或上传截图；任务备注放反馈原文、空行和 Sentry 反馈链接。目标 Sentry 项目由 `SENTRY_PROJECT` 配置，当前本地示例为 `anno-seg-test`。业务键是 Sentry Issue ID：同一 Issue 的重复投递在本地只产生一个作业。若真实反馈证明一个 Issue 可包含多条应分别建卡的反馈，需要先重新定义业务键并迁移已有数据。
+服务接收自建 Sentry 的 Issue webhook，从指定组织和项目读取 User Feedback 的 Issue、Event，在固定的 Teambition 项目创建一张需求或缺陷任务。第一版不查询、下载或上传截图；任务备注放反馈原文、空行、Sentry 反馈链接，有用户名时在最后一行追加用户名。目标 Sentry 项目由 `SENTRY_PROJECT` 配置，当前本地示例为 `anno-seg-test`。业务键是 Sentry Issue ID：同一 Issue 的重复投递在本地只产生一个作业。若真实反馈证明一个 Issue 可包含多条应分别建卡的反馈，需要先重新定义业务键并迁移已有数据。
 
 已知 Sentry Internal Integration 配置了 https://sentry-adapter.gwm-adas.com/webhooks/sentry/user-feedback，订阅 Issue webhook；实际 FEEDBACK 类 issue.created 是否投递仍要在目标 Sentry 26.6 实例验证。解析器也支持 event_alert.triggered，但当前未配置 Alert Rule Action。
 
@@ -33,7 +33,7 @@ flowchart LR
 1. **接收与验签。** POST /webhooks/sentry/user-feedback 限制 JSON 请求体为 1 MiB，以原始字节和 Sentry-Hook-Signature 做 HMAC-SHA256 验证。解析器只接收 FEEDBACK 类 issue.created 或符合条件的 event_alert.triggered；其他已验签投递返回 204。Sentry Webhook 的[签名和响应时限](https://docs.sentry.io/integrations/integration-platform/webhooks/)以及 [Issue FEEDBACK 事件](https://docs.sentry.io/integrations/integration-platform/webhooks/issues/)是此入口的协议依据。
 2. **持久化后应答。** 对接收的事件生成 issue:<issue_id> 去重键，向 feedback_jobs 做唯一键插入；重复投递命中 ON CONFLICT DO NOTHING。写入成功或已存在后返回 202，数据库写入失败返回 503。没有独立 webhook_inbox，也没有把原始反馈正文写入数据库。Sentry 对失败响应是否重投仍需实测。
 3. **领取并核实反馈。** worker 每秒尝试领取一个 pending/retry 作业，SQL 使用 FOR UPDATE SKIP LOCKED，并记录 attempts 与 10 分钟租约。worker 再调用 Sentry Issue 与 Event API 核实 issueCategory、项目 slug，并从反馈上下文或事件 tags 取分类、`taskType`、`dataset_id` 和反馈正文；不能只相信 webhook payload。非目标项目或非反馈 Issue 标为 ignored。缺少分类、`taskType`、`dataset_id`、反馈正文或链接的作业标为 needs_review，不发送建卡请求。
-4. **转换卡片。** `content` 按 `【{taskType}: {dataset_id}】 {反馈类型}` 生成，反馈类型使用与 Sentry UI 一致的中文标签，如 `【OD_correct: odc_0908-JGzm】 使用建议`。`note` 先放反馈原文，再用一个空行分隔 Sentry 反馈链接。链接优先按项目 slug、Issue ID 和项目数值 ID 生成当前 Sentry UI 使用的 `issues/feedback/?feedbackSlug=...&project=...` 地址；缺字段时回退到 API permalink 或 Issue 地址。第一版不请求 Sentry 附件接口，也不下载截图。
+4. **转换卡片。** `content` 按 `【{taskType}: {dataset_id}】 {反馈类型}` 生成，反馈类型使用与 Sentry UI 一致的中文标签，如 `【OD_correct: odc_0908-JGzm】 使用建议`。`note` 先放反馈原文，再用一个空行分隔 Sentry 反馈链接；有用户名时最后一行写 `用户名：<用户名>`。用户名先取 Issue API `metadata.name`，缺失时回退 Event `contexts.feedback.name`；两处都没有时省略该行，不使用 `event.user.username`。链接优先按项目 slug、Issue ID 和项目数值 ID 生成当前 Sentry UI 使用的 `issues/feedback/?feedbackSlug=...&project=...` 地址；缺字段时回退到 API permalink 或 Issue 地址。第一版不请求 Sentry 附件接口，也不下载截图。
 5. **鉴权后建卡。** worker 调用 Teambition.Prepare：真实模式按需获取并缓存 appToken（或按配置在本地签发 JWT），不会准备图片。Prepare 成功后，数据库由 processing 转为 creating，才发送任务创建请求。若取 token 失败，作业仍在尚未发建卡请求的 processing 阶段重试或进入 needs_review。
 6. **确认结果。** Teambition 返回明确 task ID 且数据库成功写入后才置为 done。建卡请求超时、网络错误、5xx、响应不完整或 task ID 缺失时进入 uncertain；此状态不会被 worker 自动再次领取。明确的永久错误进入 needs_review。若创建成功但保存 task ID 失败，creating 租约过期后同样转 uncertain，防止盲目再建卡。
 

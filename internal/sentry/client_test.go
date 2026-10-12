@@ -31,7 +31,7 @@ func TestGetFeedbackReadsEventWithoutRequestingAttachments(t *testing.T) {
 		case "/api/0/organizations/acme/issues/42/":
 			_, _ = io.WriteString(w, `{"id":"42","title":"用户反馈","issueCategory":"FEEDBACK","project":{"id":"5","slug":"web"}}`)
 		case "/api/0/organizations/acme/issues/42/events/oldest/":
-			_, _ = io.WriteString(w, `{"eventID":"`+eventID+`","contexts":{"feedback":{"message":"保存时页面空白","type":"bug"}}}`)
+			_, _ = io.WriteString(w, `{"eventID":"`+eventID+`","user":{"username":"login-only"},"contexts":{"feedback":{"message":"保存时页面空白","type":"bug"}}}`)
 		default:
 			t.Errorf("unexpected request: %s", r.URL.RequestURI())
 			http.NotFound(w, r)
@@ -48,7 +48,7 @@ func TestGetFeedbackReadsEventWithoutRequestingAttachments(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !feedback.IsFeedback || feedback.IssueID != "42" || feedback.EventID != eventID || feedback.Project != "web" ||
-		feedback.Title != "用户反馈" || feedback.Message != "保存时页面空白" || feedback.Kind != "bug" {
+		feedback.Title != "用户反馈" || feedback.Message != "保存时页面空白" || feedback.Kind != "bug" || feedback.Username != "" {
 		t.Fatalf("unexpected feedback: %+v", feedback)
 	}
 	if feedback.IssueURL != server.URL+"/organizations/acme/issues/feedback/?feedbackSlug=web%3A42&project=5" {
@@ -73,9 +73,9 @@ func TestGetFeedbackUsesBusinessTypeTagInsteadOfContextType(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
 		case "/api/0/organizations/acme/issues/42/":
-			_, _ = io.WriteString(w, `{"id":"42","issueCategory":"feedback","project":{"id":"5","slug":"web"}}`)
+			_, _ = io.WriteString(w, `{"id":"42","issueCategory":"feedback","metadata":{"name":"issue-name"},"project":{"id":"5","slug":"web"}}`)
 		case "/api/0/organizations/acme/issues/42/events/oldest/":
-			_, _ = io.WriteString(w, `{"eventID":"event-1","contexts":{"feedback":{"type":"feedback","message":"test"},"annotation_task":{"taskType":"OD_correct","datasetId":"context-dataset"},"feedback_details":{"dataset_id":"details-dataset"}},"tags":[{"key":"feedback_type","value":"platform_bug"},{"key":"dataset_id","value":"odc_0908-JGzm"}]}`)
+			_, _ = io.WriteString(w, `{"eventID":"event-1","user":{"username":"account-user"},"contexts":{"feedback":{"type":"feedback","name":"form-name","message":"test"},"annotation_task":{"taskType":"OD_correct","datasetId":"context-dataset"},"feedback_details":{"dataset_id":"details-dataset"}},"tags":[{"key":"feedback_type","value":"platform_bug"},{"key":"dataset_id","value":"odc_0908-JGzm"}]}`)
 		default:
 			t.Errorf("unexpected request: %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -91,8 +91,8 @@ func TestGetFeedbackUsesBusinessTypeTagInsteadOfContextType(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if feedback.Kind != "platform_bug" || feedback.TaskType != "OD_correct" || feedback.DatasetID != "odc_0908-JGzm" {
-		t.Fatalf("feedback fields = %+v, want type, task, and dataset from Sentry event", feedback)
+	if feedback.Kind != "platform_bug" || feedback.TaskType != "OD_correct" || feedback.DatasetID != "odc_0908-JGzm" || feedback.Username != "issue-name" {
+		t.Fatalf("feedback fields = %+v, want type, task, dataset, and name from Sentry Issue metadata", feedback)
 	}
 }
 
@@ -103,7 +103,7 @@ func TestGetFeedbackMetadataFallsBackToContextAndTag(t *testing.T) {
 		case "/api/0/organizations/acme/issues/42/":
 			_, _ = io.WriteString(w, `{"id":"42","issueCategory":"feedback","project":{"id":"5","slug":"web"}}`)
 		case "/api/0/organizations/acme/issues/42/events/oldest/":
-			_, _ = io.WriteString(w, `{"eventID":"event-1","contexts":{"feedback":{"type":"feedback","feedback_type":"suggestion","message":"test"},"feedback_details":{"dataset_id":"odc-fallback"}},"tags":[{"key":"task_type","value":"OD_correct"}]}`)
+			_, _ = io.WriteString(w, `{"eventID":"event-1","contexts":{"feedback":{"type":"feedback","name":"form-name","feedback_type":"suggestion","message":"test"},"feedback_details":{"dataset_id":"odc-fallback"}},"tags":[{"key":"task_type","value":"OD_correct"}]}`)
 		default:
 			t.Errorf("unexpected request: %s", r.URL.Path)
 			http.NotFound(w, r)
@@ -119,8 +119,8 @@ func TestGetFeedbackMetadataFallsBackToContextAndTag(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if feedback.Kind != "suggestion" || feedback.TaskType != "OD_correct" || feedback.DatasetID != "odc-fallback" {
-		t.Fatalf("feedback fields = %+v, want context and tag fallbacks", feedback)
+	if feedback.Kind != "suggestion" || feedback.TaskType != "OD_correct" || feedback.DatasetID != "odc-fallback" || feedback.Username != "form-name" {
+		t.Fatalf("feedback fields = %+v, want context and tag fallbacks including name", feedback)
 	}
 }
 

@@ -174,10 +174,15 @@ func feedbackTypeLabel(value string) string {
 }
 
 func cardFromFeedback(f sentry.Feedback, kind string) teambition.Card {
+	description := strings.TrimSpace(f.Message) + "\n\n" + strings.TrimSpace(f.IssueURL)
+	username := strings.Join(strings.Fields(f.Username), " ")
+	if username != "" {
+		description += "\n\n用户名：" + username
+	}
 	return teambition.Card{
 		SourceIssueID: f.IssueID,
 		Title:         title(f.TaskType, f.DatasetID, f.Kind),
-		Description:   strings.TrimSpace(f.Message) + "\n\n" + strings.TrimSpace(f.IssueURL),
+		Description:   description,
 		Kind:          kind,
 	}
 }
