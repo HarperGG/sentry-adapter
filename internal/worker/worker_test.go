@@ -41,14 +41,15 @@ func TestCardContainsFeedbackMessageAndURLWithoutImages(t *testing.T) {
 		DatasetID: "odc_0908-JGzm",
 		Kind:      "platform_bug",
 		Message:   "[反馈类型] 平台异常\n\n[问题描述]\n打开页面后无法保存",
+		Username:  "admin",
 		IssueURL:  "https://sentry.example.com/organizations/sentry/issues/feedback/?feedbackSlug=anno-dev%3A6341&project=5",
 		Attachments: []sentry.Attachment{{
 			ID: "screenshot-id", Name: "screenshot.png", MimeType: "image/png", Size: 100,
 		}},
 	}
 	card := cardFromFeedback(feedback, classify(feedback.Kind))
-	if card.Description != feedback.Message+"\n\n"+feedback.IssueURL {
-		t.Errorf("description = %q, want feedback message followed by URL", card.Description)
+	if card.Description != feedback.Message+"\n\n"+feedback.IssueURL+"\n\n用户名：admin" {
+		t.Errorf("description = %q, want feedback message, URL, then username", card.Description)
 	}
 	if card.Title != "【OD_correct: odc_0908-JGzm】 平台异常" {
 		t.Errorf("title = %q", card.Title)
@@ -58,5 +59,13 @@ func TestCardContainsFeedbackMessageAndURLWithoutImages(t *testing.T) {
 	}
 	if len(card.Images) != 0 {
 		t.Errorf("images = %d, want zero even when feedback has attachments", len(card.Images))
+	}
+}
+
+func TestCardOmitsMissingUsernameWithoutChangingFeedback(t *testing.T) {
+	f := sentry.Feedback{Message: "反馈内容", IssueURL: "https://sentry.example/issues/42/"}
+	card := cardFromFeedback(f, "bug")
+	if card.Description != "反馈内容\n\nhttps://sentry.example/issues/42/" {
+		t.Errorf("description = %q", card.Description)
 	}
 }

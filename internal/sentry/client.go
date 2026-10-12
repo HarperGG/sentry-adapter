@@ -39,6 +39,7 @@ type Feedback struct {
 	Project           string
 	Title             string
 	Message           string
+	Username          string
 	Kind              string
 	TaskType          string
 	DatasetID         string
@@ -69,7 +70,10 @@ type issueResponse struct {
 	Title         string `json:"title"`
 	Permalink     string `json:"permalink"`
 	IssueCategory string `json:"issueCategory"`
-	Project       struct {
+	Metadata      struct {
+		Name string `json:"name"`
+	} `json:"metadata"`
+	Project struct {
 		ID   string `json:"id"`
 		Slug string `json:"slug"`
 	} `json:"project"`
@@ -108,6 +112,7 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 	}
 	var details struct {
 		Message      string `json:"message"`
+		Name         string `json:"name"`
 		FeedbackType string `json:"feedback_type"`
 		Type         string `json:"type"`
 	}
@@ -158,10 +163,14 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 	if kind == "" && !strings.EqualFold(strings.TrimSpace(details.Type), "feedback") {
 		kind = strings.TrimSpace(details.Type)
 	}
+	username := strings.TrimSpace(issue.Metadata.Name)
+	if username == "" {
+		username = strings.TrimSpace(details.Name)
+	}
 	f := Feedback{
 		IsFeedback: true,
 		IssueID:    issueID, EventID: eventID, Project: issue.Project.Slug,
-		Title: issue.Title, Message: details.Message, Kind: kind,
+		Title: issue.Title, Message: details.Message, Username: username, Kind: kind,
 		TaskType: taskType, DatasetID: datasetID,
 		IssueURL: c.feedbackURL(org, issueID, issue.Project.Slug, issue.Project.ID, issue.Permalink),
 	}
