@@ -25,7 +25,10 @@ type Card struct {
 	SourceIssueID string
 	Title         string
 	Description   string
-	Kind          string // bug or feature
+	Kind          string // Legacy scenario selection: bug or feature.
+	FeedbackType  string
+	TagIDs        []string
+	ExecutorID    string
 	Images        []Image
 	preparedFiles []preparedFile
 	preparedFor   string
@@ -64,16 +67,18 @@ func (e *Permanent) Unwrap() error { return e.Cause }
 var ErrImagesUnsupported = errors.New("Teambition image upload protocol is not configured; card was not created")
 
 type Config struct {
-	BaseURL, TaskPath, UploadTokenPath        string
-	AuthMode, TokenURL                        string
-	AppID, AppSecret                          string
-	TenantID, OperatorID, ProjectID           string
-	TasklistID, StageID, StatusID, ExecutorID string
-	BugTypeID, FeatureTypeID                  string
-	CustomFieldID, CustomFieldOptionID        string
-	CustomFieldOptionTitle                    string
-	AttachmentFieldID                         string
-	UploadAllowedOrigins                      []string
+	BaseURL, TaskPath, UploadTokenPath string
+	AuthMode, TokenURL                 string
+	AppID, AppSecret                   string
+	TenantID, OperatorID, ProjectID    string
+	TasklistID, StageID, StatusID      string
+	ExecutorID                         string // Deprecated: assignment is resolved per card, never globally.
+	ScenarioID                         string
+	BugTypeID, FeatureTypeID           string
+	CustomFieldID, CustomFieldOptionID string
+	CustomFieldOptionTitle             string
+	AttachmentFieldID                  string
+	UploadAllowedOrigins               []string
 }
 
 type Client struct {
@@ -90,8 +95,8 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") || u.User != nil {
 		return nil, errors.New("invalid Teambition base URL")
 	}
-	if cfg.BugTypeID == "" || cfg.FeatureTypeID == "" {
-		return nil, errors.New("both Teambition bug and feature scenario IDs are required")
+	if cfg.ScenarioID == "" && (cfg.BugTypeID == "" || cfg.FeatureTypeID == "") {
+		return nil, errors.New("a shared Teambition scenario ID or both legacy scenario IDs are required")
 	}
 	if (cfg.CustomFieldID != "" || cfg.CustomFieldOptionID != "" || cfg.CustomFieldOptionTitle != "") &&
 		(cfg.CustomFieldID == "" || cfg.CustomFieldOptionID == "" || cfg.CustomFieldOptionTitle == "") {
@@ -137,11 +142,9 @@ func (c *Client) Create(ctx context.Context, card Card) (string, error) {
 	if len(card.preparedFiles) > 0 && (len(card.preparedFiles) != len(card.Images) || card.preparedFor != c.cfg.ProjectID) {
 		return "", &Permanent{errors.New("prepared Teambition images do not match this card and project")}
 	}
-	scenarioID := c.cfg.BugTypeID
-	if card.Kind == "feature" {
-		scenarioID = c.cfg.FeatureTypeID
-	} else if card.Kind != "bug" {
-		return "", &Permanent{fmt.Errorf("unsupported feedback kind %q", card.Kind)}
+	scenarioID, err := c.scenarioID(card)
+	if err != nil {
+		return "", err
 	}
 	token, err := c.accessToken(ctx)
 	if err != nil {
@@ -157,11 +160,19 @@ func (c *Client) Create(ctx context.Context, card Card) (string, error) {
 	}
 	for key, value := range map[string]string{
 		"tasklistId": c.cfg.TasklistID, "stageId": c.cfg.StageID,
-		"taskflowstatusId": c.cfg.StatusID, "executorId": c.cfg.ExecutorID,
+		"taskflowstatusId": c.cfg.StatusID,
 	} {
 		if value != "" {
 			request[key] = value
 		}
+	}
+	if len(card.TagIDs) > 0 {
+		request["tagIds"] = card.TagIDs
+	}
+	// A global default must not assign data issues, suggestions, or unclassified
+	// feedback. Only an explicitly routed platform bug can have an executor.
+	if card.FeedbackType == "platform_bug" && strings.TrimSpace(card.ExecutorID) != "" {
+		request["executorId"] = strings.TrimSpace(card.ExecutorID)
 	}
 	customFields := make([]any, 0, 2)
 	if c.cfg.CustomFieldID != "" {
@@ -193,8 +204,8 @@ func (c *Client) Create(ctx context.Context, card Card) (string, error) {
 // Prepare uploads screenshot bytes before the task create request. If it fails,
 // retrying is safe because no task has been created yet.
 func (c *Client) Prepare(ctx context.Context, card Card) (Card, error) {
-	if card.Kind != "bug" && card.Kind != "feature" {
-		return Card{}, &Permanent{fmt.Errorf("unsupported feedback kind %q", card.Kind)}
+	if _, err := c.scenarioID(card); err != nil {
+		return Card{}, err
 	}
 	if len(card.Images) == 0 {
 		_, err := c.accessToken(ctx)
@@ -243,6 +254,32 @@ func (c *Client) Prepare(ctx context.Context, card Card) (Card, error) {
 	card.preparedFiles = files
 	card.preparedFor = c.cfg.ProjectID
 	return card, nil
+}
+
+// Feedback categories drive routing independently of the Teambition scenario.
+// Legacy cards remain supported while deployments move to one shared scenario.
+func (c *Client) scenarioID(card Card) (string, error) {
+	kind := card.Kind
+	if card.FeedbackType != "" {
+		switch card.FeedbackType {
+		case "platform_bug":
+			kind = "bug"
+		case "data_issue", "suggestion", "other":
+			kind = "feature"
+		default:
+			return "", &Permanent{fmt.Errorf("unsupported feedback type %q", card.FeedbackType)}
+		}
+	}
+	if kind != "bug" && kind != "feature" {
+		return "", &Permanent{fmt.Errorf("unsupported feedback kind %q", kind)}
+	}
+	if c.cfg.ScenarioID != "" {
+		return c.cfg.ScenarioID, nil
+	}
+	if kind == "feature" {
+		return c.cfg.FeatureTypeID, nil
+	}
+	return c.cfg.BugTypeID, nil
 }
 
 type uploadTicket struct {

@@ -16,6 +16,7 @@ type Config struct {
 	SentryOrg                      string
 	SentryProject                  string
 	SentryAttachmentRedirectHosts  []string
+	FeedbackRoutingFile            string
 	TeambitionMode                 string
 	TeambitionAuthMode             string
 	TeambitionTokenURL             string
@@ -54,6 +55,7 @@ func Load() (Config, error) {
 		SentryOrg:                      fallback(os.Getenv("SENTRY_ORG"), "sentry"),
 		SentryProject:                  fallback(os.Getenv("SENTRY_PROJECT"), "anno-seg-test"),
 		SentryAttachmentRedirectHosts:  splitHosts(os.Getenv("SENTRY_ATTACHMENT_REDIRECT_HOSTS")),
+		FeedbackRoutingFile:            fallback(os.Getenv("FEEDBACK_ROUTING_FILE"), "config/feedback-routing.json"),
 		TeambitionMode:                 fallback(os.Getenv("TEAMBITION_MODE"), "mock"),
 		TeambitionAuthMode:             fallback(os.Getenv("TEAMBITION_AUTH_MODE"), "app_token"),
 		TeambitionTokenURL:             teambitionTokenURL,

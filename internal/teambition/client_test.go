@@ -761,3 +761,160 @@ func TestCustomFieldConfigurationMustBeComplete(t *testing.T) {
 		t.Fatal("accepted a partial custom field configuration")
 	}
 }
+
+func TestCreateUsesPerCardRoutingAndSharedScenario(t *testing.T) {
+	for _, tc := range []struct {
+		name, feedbackType, executorID, wantExecutor string
+	}{
+		{"matched platform bug", "platform_bug", "owner-id", "owner-id"},
+		{"unmatched platform bug", "platform_bug", "", ""},
+		{"data issue", "data_issue", "must-not-assign", ""},
+		{"suggestion", "suggestion", "must-not-assign", ""},
+		{"other", "other", "must-not-assign", ""},
+		{"legacy card", "", "must-not-assign", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Method != http.MethodPost || r.URL.Path != "/gateway/v3/task/create" {
+					t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+				}
+				var body struct {
+					ScenarioID     string          `json:"scenariofieldconfigId"`
+					TagIDs         []string        `json:"tagIds"`
+					ExecutorID     json.RawMessage `json:"executorId"`
+					InvolveMembers []string        `json:"involveMembers"`
+					CustomFields   []struct {
+						CfID  string `json:"cfId"`
+						Value []struct {
+							ID    string `json:"id"`
+							Title string `json:"title"`
+						} `json:"value"`
+					} `json:"customfields"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					t.Errorf("decode task payload: %v", err)
+				}
+				if body.ScenarioID != "shared-scenario" || len(body.TagIDs) != 1 || body.TagIDs[0] != "feedback-tag" {
+					t.Errorf("scenario/tags = %q/%v", body.ScenarioID, body.TagIDs)
+				}
+				if tc.wantExecutor == "" {
+					if len(body.ExecutorID) != 0 {
+						t.Errorf("executorId = %s, want field omitted", body.ExecutorID)
+					}
+				} else {
+					var executor string
+					if err := json.Unmarshal(body.ExecutorID, &executor); err != nil || executor != tc.wantExecutor {
+						t.Errorf("executorId = %s, error=%v; want one string %q", body.ExecutorID, err, tc.wantExecutor)
+					}
+				}
+				if len(body.InvolveMembers) != 1 || body.InvolveMembers[0] != "operator-id" {
+					t.Errorf("involveMembers = %v; operator must remain a participant", body.InvolveMembers)
+				}
+				if len(body.CustomFields) != 1 || body.CustomFields[0].CfID != "platform-field" ||
+					len(body.CustomFields[0].Value) != 1 || body.CustomFields[0].Value[0].ID != "platform-option" ||
+					body.CustomFields[0].Value[0].Title != "标注平台" {
+					t.Errorf("fixed platform customfield changed: %+v", body.CustomFields)
+				}
+				_, _ = io.WriteString(w, `{"result":{"taskId":"routed-task"}}`)
+			}))
+			defer api.Close()
+			client, err := New(Config{
+				BaseURL: api.URL, TaskPath: "/gateway/v3/task/create", AuthMode: "local_jwt",
+				AppID: "app-id", AppSecret: "app-secret", OperatorID: "operator-id",
+				ScenarioID: "shared-scenario", BugTypeID: "old-bug", FeatureTypeID: "old-feature",
+				ExecutorID: "global-must-not-assign", CustomFieldID: "platform-field",
+				CustomFieldOptionID: "platform-option", CustomFieldOptionTitle: "标注平台",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			card := Card{
+				Kind: "bug", FeedbackType: tc.feedbackType,
+				TagIDs: []string{"feedback-tag"}, ExecutorID: tc.executorID,
+			}
+			if tc.feedbackType != "" {
+				card.Kind = ""
+			}
+			prepared, err := client.Prepare(context.Background(), card)
+			if err != nil {
+				t.Fatalf("Prepare routed card: %v", err)
+			}
+			id, err := client.Create(context.Background(), prepared)
+			if err != nil || id != "routed-task" || calls.Load() != 1 {
+				t.Fatalf("Create = %q, %v, calls=%d; want one routed task", id, err, calls.Load())
+			}
+		})
+	}
+}
+
+func TestPrepareSupportsSharedScenarioWithoutLegacyTypes(t *testing.T) {
+	client, err := New(Config{
+		BaseURL: "https://teambition.example", AuthMode: "local_jwt",
+		AppID: "app-id", AppSecret: "app-secret", ScenarioID: "shared-scenario",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, feedbackType := range []string{"platform_bug", "data_issue", "suggestion", "other"} {
+		if _, err := client.Prepare(context.Background(), Card{FeedbackType: feedbackType}); err != nil {
+			t.Errorf("Prepare(%q) with shared scenario: %v", feedbackType, err)
+		}
+	}
+}
+
+func TestUnsupportedFeedbackTypeFailsBeforeNetworkRequest(t *testing.T) {
+	var calls atomic.Int32
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer api.Close()
+	client, err := New(Config{
+		BaseURL: api.URL, TaskPath: "/gateway/v3/task/create", AuthMode: "local_jwt",
+		AppID: "app-id", AppSecret: "app-secret", ScenarioID: "shared-scenario",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.Create(context.Background(), Card{Kind: "bug", FeedbackType: "unknown"})
+	var permanent *Permanent
+	if !errors.As(err, &permanent) || calls.Load() != 0 {
+		t.Fatalf("Create unknown feedback = %v, calls=%d; want validation failure before network", err, calls.Load())
+	}
+}
+
+func TestRoutedCreateDoesNotRetryUncertainResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		status     int
+	}{
+		{"server error", `{"errorMessage":"temporarily unavailable"}`, http.StatusBadGateway},
+		{"missing task ID", `{"result":{}}`, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer api.Close()
+			client, err := New(Config{
+				BaseURL: api.URL, TaskPath: "/gateway/v3/task/create", AuthMode: "local_jwt",
+				AppID: "app-id", AppSecret: "app-secret", ScenarioID: "shared-scenario",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, err := client.Create(context.Background(), Card{
+				FeedbackType: "platform_bug", TagIDs: []string{"feedback-tag"}, ExecutorID: "owner-id",
+			})
+			var uncertain *Uncertain
+			if id != "" || !errors.As(err, &uncertain) || calls.Load() != 1 {
+				t.Fatalf("Create = %q, %v, calls=%d; want uncertain outcome after one request", id, err, calls.Load())
+			}
+		})
+	}
+}

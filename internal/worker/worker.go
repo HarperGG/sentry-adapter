@@ -3,11 +3,11 @@ package worker
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
 
+	"sentry-adapter/internal/routing"
 	"sentry-adapter/internal/sentry"
 	"sentry-adapter/internal/store"
 	"sentry-adapter/internal/teambition"
@@ -17,6 +17,7 @@ type Worker struct {
 	Store        *store.Store
 	Sentry       *sentry.Client
 	Teambition   teambition.Creator
+	Routing      *routing.Rules
 	Organization string
 	Project      string
 	MockMode     bool
@@ -76,20 +77,21 @@ func (w *Worker) process(ctx context.Context, j store.Job) {
 		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback has no Sentry URL"))
 		return
 	}
-	kind := classify(f.Kind)
-	if kind == "" {
-		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback type is not mapped"))
-		return
-	}
-	if strings.TrimSpace(f.TaskType) == "" || strings.TrimSpace(f.DatasetID) == "" {
-		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback task type or dataset ID is missing"))
-		return
-	}
 	if strings.TrimSpace(f.Message) == "" {
 		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback message is missing"))
 		return
 	}
-	card := cardFromFeedback(f, kind)
+	decision := w.Routing.Resolve(f.Kind, f.TaskType)
+	if decision.TagID == "" {
+		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback routing configuration is unavailable"))
+		return
+	}
+	// Missing task metadata must not hide a feedback report. The routing decision
+	// leaves its executor empty so the resulting card can be triaged manually.
+	if decision.ReviewReason != "" {
+		log.Warn("feedback requires manual triage", "reason", decision.ReviewReason)
+	}
+	card := cardFromFeedback(f, decision)
 	card, err = w.Teambition.Prepare(ctx, card)
 	if err != nil {
 		var permanent *teambition.Permanent
@@ -126,63 +128,5 @@ func (w *Worker) process(ctx context.Context, j store.Job) {
 func (w *Worker) finish(_ context.Context, log *slog.Logger, err error) {
 	if err != nil {
 		log.Error("update job", "error", err)
-	}
-}
-
-func classify(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "platform_bug", "feature_gap", "bug", "defect":
-		return "bug"
-	case "suggestion", "other", "feature", "request":
-		return "feature"
-	default:
-		return ""
-	}
-}
-
-func title(taskType, datasetID, feedbackType string) string {
-	label := feedbackTypeLabel(feedbackType)
-	metadata := fmt.Sprintf("%s: %s", strings.Join(strings.Fields(taskType), " "),
-		strings.Join(strings.Fields(datasetID), " "))
-	suffix := "】 " + label
-	// Preserve the feedback type if long metadata reaches the adapter's 100-rune cap.
-	remaining := 100 - len([]rune("【"+suffix))
-	runes := []rune(metadata)
-	if len(runes) > remaining {
-		metadata = string(runes[:remaining-1]) + "…"
-	}
-	return "【" + metadata + suffix
-}
-
-func feedbackTypeLabel(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "platform_bug":
-		return "平台异常"
-	case "feature_gap":
-		return "功能不符合预期"
-	case "suggestion":
-		return "使用建议"
-	case "other":
-		return "其他"
-	case "bug", "defect":
-		return "缺陷"
-	case "feature", "request":
-		return "需求"
-	default:
-		return "用户反馈"
-	}
-}
-
-func cardFromFeedback(f sentry.Feedback, kind string) teambition.Card {
-	description := strings.TrimSpace(f.Message) + "\n\n" + strings.TrimSpace(f.IssueURL)
-	username := strings.Join(strings.Fields(f.Username), " ")
-	if username != "" {
-		description += "\n\n用户名：" + username
-	}
-	return teambition.Card{
-		SourceIssueID: f.IssueID,
-		Title:         title(f.TaskType, f.DatasetID, f.Kind),
-		Description:   description,
-		Kind:          kind,
 	}
 }

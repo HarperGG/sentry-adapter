@@ -1,0 +1,72 @@
+{
+  "feedbackTags": {
+    "platform_bug": "6ae0449c6ce07cfbf775b7c4",
+    "data_issue": "6ae048f9e39f6320c05f93d7",
+    "suggestion": "6ae0490edcbd5c5e9e53d410",
+    "other": "6ae04920131cc905fc5a7dac"
+  },
+  "owners": [
+    {
+      "name": "田洪果",
+      "executorId": "68e8d3202e316da74b8189cc",
+      "taskTypes": ["Lidar_seg", "Lidar_seg_4D", "Driving_Lidar_seg"]
+    },
+    {
+      "name": "张媛媛",
+      "executorId": "6889c08f7c2784422c96ae0f",
+      "taskTypes": [
+        "PSD",
+        "PSD_3D",
+        "Freespace",
+        "Freespace_3D",
+        "Road_3D",
+        "Driving_Lane",
+        "Lane",
+        "Marker",
+        "Road_Topo",
+        "HD_map"
+      ]
+    },
+    {
+      "name": "王玉兰",
+      "executorId": "69ce485f652bf1ac6daa9b05",
+      "taskTypes": [
+        "2D_seg",
+        "CLF_2D",
+        "PD_check",
+        "Lane_check",
+        "TSR",
+        "TLR",
+        "TLR_E2E",
+        "LM_SRL",
+        "Dst",
+        "Common_2D",
+        "VLM_Marker",
+        "VLM_Lane",
+        "VLM_2D",
+        "VLM_PSD",
+        "VLM_Text",
+        "VLM_Text_sequence",
+        "VLA",
+        "VLA_sequence",
+        "Lane_map",
+        "SD_map"
+      ]
+    },
+    {
+      "name": "王建",
+      "executorId": "67c53de0c45defb1e0693426",
+      "taskTypes": [
+        "OD",
+        "OD_4D",
+        "OD_correct",
+        "OD_check",
+        "Sim_od",
+        "Sim_od_sod",
+        "TLR_4D",
+        "Occ_check",
+        "Driving_Occ_check"
+      ]
+    }
+  ]
+}
