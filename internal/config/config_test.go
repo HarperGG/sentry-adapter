@@ -12,6 +12,7 @@ func TestLoadUsesEnvironmentForSentryProjectAndTeambitionCredentials(t *testing.
 		"SENTRY_AUTH_TOKEN_FILE":               "",
 		"SENTRY_ORG":                           "example-org",
 		"SENTRY_PROJECT":                       "custom-feedback-project",
+		"FEEDBACK_ROUTING_FILE":                "/etc/adapter/routing.json",
 		"TEAMBITION_MODE":                      "real",
 		"TEAMBITION_AUTH_MODE":                 "app_token",
 		"TEAMBITION_TOKEN_URL":                 "",
@@ -37,6 +38,9 @@ func TestLoadUsesEnvironmentForSentryProjectAndTeambitionCredentials(t *testing.
 	}
 	if c.SentryOrg != "example-org" || c.SentryProject != "custom-feedback-project" {
 		t.Errorf("Sentry target = %q/%q", c.SentryOrg, c.SentryProject)
+	}
+	if c.FeedbackRoutingFile != "/etc/adapter/routing.json" {
+		t.Errorf("routing config path = %q", c.FeedbackRoutingFile)
 	}
 	if c.TeambitionAppID != "test-client-id" || c.TeambitionAppSecret != "test-client-secret" {
 		t.Error("Teambition credentials were not loaded from environment")

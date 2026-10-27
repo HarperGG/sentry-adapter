@@ -128,12 +128,13 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 	}
 	var feedbackDetails struct {
 		DatasetID string `json:"dataset_id"`
+		TaskType  string `json:"task_type"`
 	}
 	if raw, ok := event.Contexts["feedback_details"]; ok {
 		_ = json.Unmarshal(raw, &feedbackDetails)
 	}
-	kind := strings.TrimSpace(details.FeedbackType)
-	taskType := strings.TrimSpace(annotationTask.TaskType)
+	kind := ""
+	taskType := ""
 	datasetID := ""
 	for _, tag := range event.Tags {
 		value := strings.TrimSpace(tag.Value)
@@ -151,6 +152,17 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 				datasetID = value
 			}
 		}
+	}
+	if kind == "" {
+		kind = strings.TrimSpace(details.FeedbackType)
+	}
+	// Feedback-specific tags/context take precedence over the inherited task
+	// scope. Do not infer a backend task type from route or category labels.
+	if taskType == "" {
+		taskType = strings.TrimSpace(feedbackDetails.TaskType)
+	}
+	if taskType == "" {
+		taskType = strings.TrimSpace(annotationTask.TaskType)
 	}
 	if datasetID == "" {
 		datasetID = strings.TrimSpace(feedbackDetails.DatasetID)

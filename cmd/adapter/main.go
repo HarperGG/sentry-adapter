@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"sentry-adapter/internal/config"
+	"sentry-adapter/internal/routing"
 	"sentry-adapter/internal/sentry"
 	"sentry-adapter/internal/store"
 	"sentry-adapter/internal/teambition"
@@ -30,6 +31,10 @@ func main() {
 
 func run(logger *slog.Logger) error {
 	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	rules, err := routing.Load(cfg.FeedbackRoutingFile)
 	if err != nil {
 		return err
 	}
@@ -68,7 +73,7 @@ func run(logger *slog.Logger) error {
 			AppSecret:              cfg.TeambitionAppSecret, TenantID: cfg.TeambitionTenantID,
 			OperatorID: cfg.TeambitionOperatorID, ProjectID: cfg.TeambitionProjectID,
 			TasklistID: cfg.TeambitionTasklistID, StageID: cfg.TeambitionStageID,
-			StatusID: cfg.TeambitionStatusID, ExecutorID: cfg.TeambitionExecutorID,
+			StatusID: cfg.TeambitionStatusID, ScenarioID: cfg.TeambitionScenarioID,
 			BugTypeID: cfg.TeambitionBugTypeID, FeatureTypeID: cfg.TeambitionFeatureTypeID,
 		})
 		if err != nil {
@@ -77,6 +82,7 @@ func run(logger *slog.Logger) error {
 		logger.Info("Teambition client ready", "mode", "real", "auth_mode", cfg.TeambitionAuthMode)
 	}
 	w := &worker.Worker{Store: db, Sentry: sentryClient, Teambition: creator,
+		Routing:      rules,
 		Organization: cfg.SentryOrg, Project: cfg.SentryProject,
 		MockMode: cfg.TeambitionMode == "mock", Logger: logger}
 	go w.Run(ctx)

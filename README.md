@@ -8,12 +8,13 @@
 
 - `POST /webhooks/sentry/user-feedback`：对原始请求体验证 `Sentry-Hook-Signature`，过滤 `issue.created` 的 `FEEDBACK` 类别，也兼容 `event_alert.triggered`。当前 Sentry 配置使用的是前一种。
 - 先写 PostgreSQL 去重作业，再返回 `202`；后台 worker 只读取 Sentry Issue 和 Event，不查询或下载截图。
-- `content` 按 `【taskType: dataset_id】 反馈类型` 生成，反馈类型使用与 Sentry 页面一致的中文标签，例如 `【OD_correct: odc_0908-JGzm】 使用建议`。`note` 写入反馈原文、一个空行、这条反馈的 Sentry 链接；若反馈提供用户名，最后一行写入 `用户名：<用户名>`，否则省略该行。不处理图片。缺少分类、`taskType`、`dataset_id`、反馈正文或链接时，作业进入 `needs_review`，不调用 Teambition 建卡。
+- `content` 按 `【taskType: dataset_id】 问题描述摘要` 生成，从描述中删除图片与链接地址、合并空白，摘要最多 60 个字符、完整标题最多 100 个字符。`note` 保留反馈原文、Sentry 链接及可选用户名。任务类型或数据集缺失时使用“未知任务类型／未知数据集”，摘要无有效文字时使用“问题详情见反馈”；反馈正文或链接缺失仍进入 `needs_review`。
+- 通过独立 JSON 配置把 `platform_bug / data_issue / suggestion / other` 映射到四个 TB 分类标签；只有平台异常按 `task_type` 指派一名负责人。旧 `feature_gap`、未知或缺失分类归“其他”并记录待分流原因，未配置负责人仍建卡但不指派。
 - Teambition 客户端默认向私有 `https://teambition.gwm.cn/gateway/appToken` POST `appId`、`appSecret`，缓存返回的 `appToken`，作为 `Authorization: Bearer <appToken>` 调用 `/gateway/v3/task/create`；距过期不足 100 秒时重新获取。可配置 `TEAMBITION_AUTH_MODE=local_jwt`，沿用本地签发 HS256 JWT 的方式。建卡 body 包含 `involveMembers`、`objectType=task`、共用场景 ID 和配置的下拉自定义字段；只有拿到明确 task ID 才记为成功。
 - `mock` 模式不会写入 Teambition；真实模式第一版不调用截图上传接口，也不把截图放进任务的文件自定义字段。上传辅助代码保留供后续联调，当前业务链路不会使用。
 - 建卡请求发出后发生超时、5xx 或响应不完整时进入 `uncertain`，不会自动再次建卡。
 
-**尚未完成私有环境端到端联调**：反馈 Event 的分类字段和链接需要用一条 Sentry 26.6 真样例核对；私有 appToken 接口在本机仍返回 403。截图上传暂不属于第一版链路。
+**尚未完成私有环境端到端联调**：反馈 Event 的分类字段和链接需要用一条 Sentry 26.6 真样例核对；新建卡请求中的 `tagIds` 和单人 `executorId` 需要在私有网关验证。截图上传暂不属于第一版链路。
 
 ## 目录
 
@@ -24,40 +25,49 @@ internal/sentry     Issue、Event 读取；截图辅助代码暂不使用
 internal/teambition 在线 appToken / 本地 JWT、建卡与 Mock；上传辅助代码暂不使用
 internal/store      PostgreSQL 作业与状态转换
 internal/worker     反馈过滤、转换、失败分类
+internal/routing    四类标签和单人负责人配置、校验与解析
 docs/architecture.md 架构与上线清单
 config/credentials.env.example Teambition 应用凭据配置模板
+config/feedback-routing.json 四类反馈标签和品类负责人配置
 ```
 
 ## 配置文件
 
-部署时使用三处配置，实际凭据只保存在部署主机：
+部署时使用以下配置，实际凭据只保存在部署主机：
 
-| 文件                     | 内容                                                                                                                          | 是否提交                                     |
-| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
-| `.env`                   | 非敏感设置，包括 `SENTRY_PROJECT`、Teambition 目标项目与任务字段 ID                                                           | 否；由 `.env.example` 复制                   |
-| `config/credentials.env` | `TEAMBITION_APP_ID` 和 `TEAMBITION_APP_SECRET`，真实模式下由 Compose 注入为容器环境变量，用于在线获取 appToken 或本地签发 JWT | 否；由 `config/credentials.env.example` 复制 |
-| `secrets/*`              | 数据库密码与连接串、Sentry Webhook Secret、Sentry API Token                                                                   | 否；由 Compose secrets 挂载                  |
+| 文件                           | 内容                                                                                                                          | 是否提交                                     |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
+| `.env`                         | 非敏感设置，包括 `SENTRY_PROJECT`、Teambition 目标项目与任务字段 ID                                                           | 否；由 `.env.example` 复制                   |
+| `config/feedback-routing.json` | 四类反馈标签 ID、负责人及其 `taskTypes`；不包含密钥                                                                           | 是                                           |
+| `config/credentials.env`       | `TEAMBITION_APP_ID` 和 `TEAMBITION_APP_SECRET`，真实模式下由 Compose 注入为容器环境变量，用于在线获取 appToken 或本地签发 JWT | 否；由 `config/credentials.env.example` 复制 |
+| `secrets/*`                    | 数据库密码与连接串、Sentry Webhook Secret、Sentry API Token                                                                   | 否；由 Compose secrets 挂载                  |
 
 在 `.env` 中设置 `SENTRY_PROJECT` 为当前目标 Sentry 项目的 **slug**，并确保 Internal Integration 已在该项目安装且 Sentry API Token 有相应读取权限。改动后重新部署适配器；现有数据库中其他项目的作业不会因改配置自动迁移或重新处理。`TEAMBITION_PROJECT_ID` 是建卡目标项目，与 `SENTRY_PROJECT` 不同。
 
 `config/credentials.env` 的值是 Teambition 企业内部应用的 Client ID 和 Client Secret。请只在本机私有文件中填写实际值，不要放到 `.env.example`、命令行参数或提交记录中。Compose 的环境变量可被拥有 Docker 管理权限的人查看，应限制部署主机和此文件的访问权限。程序同时支持 `TEAMBITION_APP_SECRET_FILE`，但本部署方式使用直接的 `TEAMBITION_APP_SECRET` 环境变量；两者不能同时设置。
 
-之前提供的任务 cURL 使用浏览器 Cookie 调用 `/api/v2/tasks`。现在以用户已调用成功的私有 `/gateway/appToken` 和 `/gateway/v3/task/create` 请求为准：已确认一个 `scenariofieldconfigId` 可供所有反馈共用，`involveMembers` 使用配置的操作人 ID，下拉 `customfields` 使用单独配置的字段与选项 ID。旧 cURL 中的任务列表、阶段、流程状态和执行人 ID 仍可配置，但本地 `.env` 已清空这些未经当前成功请求验证的可选值。第一版无需配置截图文件字段。
+`config/feedback-routing.json` 是分类标签与负责人映射的唯一来源。`feedbackTags` 必须包含四个分类及其标签 ID；`owners` 中每组配置姓名、一个 `executorId` 和负责的 `taskTypes`。当前包含四位负责人、42 个任务类型；`PD_label`、`Tagging`、`TSR_AS` 尚未指定负责人。任务类型忽略大小写并去除首尾空格，同一类型重复配置会阻止启动。ID 必须是 24 位十六进制值；此校验不代表已验证私有项目权限。
 
-| Teambition 建卡字段                  | 来源                                                                               |
-| ------------------------------------ | ---------------------------------------------------------------------------------- |
-| `content`                            | `【{taskType}: {dataset_id}】 {反馈类型}`；反馈类型使用与 Sentry UI 一致的中文标签 |
-| `note`                               | 反馈原文、空行、Sentry 反馈链接；有用户名时最后一行追加 `用户名：<用户名>`；不包含图片 |
-| `projectId`、`scenariofieldconfigId` | `TEAMBITION_PROJECT_ID`、共用的 `TEAMBITION_SCENARIO_ID`                           |
-| `involveMembers`                     | `[TEAMBITION_OPERATOR_ID]`                                                         |
-| `objectType`                         | 固定为 `task`                                                                      |
-| `customfields`                       | 配置的下拉字段与选项；第一版不加入截图文件字段                                     |
+程序默认从 `config/feedback-routing.json` 读取，可用 `FEEDBACK_ROUTING_FILE` 指定其他路径。Compose 将仓库内配置只读挂载到 `/etc/sentry-adapter/feedback-routing.json`，并覆盖容器内路径；缺文件或内容无效时启动失败。修改文件后重启 adapter 生效，不需要重新编译程序；部署主机须保留该文件并允许容器用户读取。更新配置只影响尚未处理的作业，不会自动改派已有卡片。
+
+建卡沿用已确认的共用 `scenariofieldconfigId`，`involveMembers` 使用操作人 ID，下拉 `customfields` 继续表示“标注平台”。四个分类标签通过独立 `tagIds` 写入，不能替换成自定义字段选项 ID。负责人只来自路由配置，旧 `TEAMBITION_EXECUTOR_ID` 不再作为全局兜底。第一版无需配置截图文件字段。
+
+| Teambition 建卡字段                  | 来源                                                                                       |
+| ------------------------------------ | ------------------------------------------------------------------------------------------ |
+| `content`                            | `【{taskType}: {dataset_id}】 {清洗后问题描述摘要}`                                        |
+| `note`                               | 反馈原文、空行、Sentry 反馈链接；有用户名时最后一行追加 `用户名：<用户名>`；不搬运截图附件 |
+| `projectId`、`scenariofieldconfigId` | `TEAMBITION_PROJECT_ID`、共用的 `TEAMBITION_SCENARIO_ID`                                   |
+| `involveMembers`                     | `[TEAMBITION_OPERATOR_ID]`                                                                 |
+| `objectType`                         | 固定为 `task`                                                                              |
+| `customfields`                       | 配置的下拉字段与选项；第一版不加入截图文件字段                                             |
+| `tagIds`                             | `feedback-routing.json` 中该反馈分类对应的一个标签 ID                                      |
+| `executorId`                         | 仅平台异常按 `task_type` 匹配到的单个用户 ID；其他情况省略                                 |
 
 反馈深链接使用 Sentry Issue API 返回的项目 slug、项目数值 ID 和 Issue ID，构成 `.../organizations/{org}/issues/feedback/?feedbackSlug={projectSlug}:{issueId}&project={projectId}`。缺少这些字段时回退到 API permalink 或普通 Issue 地址。
 
 备注中的用户名使用 Sentry 反馈的 Issue API `metadata.name`，缺失时回退到 Event `contexts.feedback.name`；两处都没有时省略用户名行。`event.user.username` 不作为反馈用户名。
 
-缺少分类、`taskType`、`dataset_id`、反馈正文或最终生成的反馈链接时，作业进入 `needs_review`，不会向 Teambition 发送建卡请求。
+缺少任务元信息时使用标题兜底；无法匹配负责人时记录分流提示并保持未指派。缺少反馈正文或最终生成的反馈链接时进入 `needs_review`，不会向 Teambition 发送建卡请求。创建结果不明确时仍进入 `uncertain`，不能通过重新建卡补标签或负责人。
 
 ## 使用 Make 构建与验证
 

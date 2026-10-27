@@ -27,6 +27,7 @@ services:
     environment:
       LISTEN_ADDR: :8787
       TEAMBITION_MODE: mock
+      FEEDBACK_ROUTING_FILE: /etc/sentry-adapter/feedback-routing.json
       DATABASE_URL_FILE: /run/secrets/database_url
       SENTRY_WEBHOOK_SECRET_FILE: /run/secrets/sentry_webhook_secret
       SENTRY_AUTH_TOKEN_FILE: /run/secrets/sentry_auth_token
@@ -37,6 +38,13 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    volumes:
+      - type: bind
+        source: ./config/feedback-routing.json
+        target: /etc/sentry-adapter/feedback-routing.json
+        read_only: true
+        bind:
+          create_host_path: false
     ports:
       - "${ADAPTER_BIND_IP:-127.0.0.1}:8787:8787"
     read_only: true
