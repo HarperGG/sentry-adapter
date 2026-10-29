@@ -86,8 +86,8 @@ func (w *Worker) process(ctx context.Context, j store.Job) {
 		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback routing configuration is unavailable"))
 		return
 	}
-	// Missing task metadata must not hide a feedback report. The routing decision
-	// leaves its executor empty so the resulting card can be triaged manually.
+	// Missing task metadata must not hide a feedback report. Fixed category owners
+	// still apply; only platform assignment needs a matching task type.
 	if decision.ReviewReason != "" {
 		log.Warn("feedback requires manual triage", "reason", decision.ReviewReason)
 	}
