@@ -768,8 +768,11 @@ func TestCreateUsesPerCardRoutingAndSharedScenario(t *testing.T) {
 	}{
 		{"matched platform bug", "platform_bug", "owner-id", "owner-id"},
 		{"unmatched platform bug", "platform_bug", "", ""},
-		{"data issue", "data_issue", "must-not-assign", ""},
-		{"suggestion", "suggestion", "must-not-assign", ""},
+		{"assigned data issue", "data_issue", "data-owner", "data-owner"},
+		{"unassigned data issue", "data_issue", "", ""},
+		{"assigned suggestion", "suggestion", "suggestion-owner", "suggestion-owner"},
+		{"unassigned suggestion", "suggestion", "", ""},
+		{"trimmed data owner", "data_issue", " data-owner ", "data-owner"},
 		{"other", "other", "must-not-assign", ""},
 		{"legacy card", "", "must-not-assign", ""},
 	} {

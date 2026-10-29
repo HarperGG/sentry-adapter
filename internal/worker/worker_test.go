@@ -58,8 +58,12 @@ func TestConfiguredRoutingReachesTaskCreateRequest(t *testing.T) {
 	cases := []struct {
 		name, kind, taskType, tagID, executorID string
 	}{
-		{"data issue", "data_issue", "OD", "6ae048f9e39f6320c05f93d7", ""},
-		{"suggestion", "suggestion", "OD", "6ae0490edcbd5c5e9e53d410", ""},
+		{"data issue", "data_issue", "OD", "6ae048f9e39f6320c05f93d7", "68707b9783c2517553ea6203"},
+		{"data missing task", "data_issue", "", "6ae048f9e39f6320c05f93d7", "68707b9783c2517553ea6203"},
+		{"data unconfigured task", "data_issue", "PD_label", "6ae048f9e39f6320c05f93d7", "68707b9783c2517553ea6203"},
+		{"suggestion", "suggestion", "OD", "6ae0490edcbd5c5e9e53d410", "6a277b7030ff5045c8d8bfd8"},
+		{"suggestion missing task", "suggestion", "", "6ae0490edcbd5c5e9e53d410", "6a277b7030ff5045c8d8bfd8"},
+		{"suggestion unconfigured task", "suggestion", "PD_label", "6ae0490edcbd5c5e9e53d410", "6a277b7030ff5045c8d8bfd8"},
 		{"other", "other", "OD", "6ae04920131cc905fc5a7dac", ""},
 		{"point cloud", "platform_bug", "Lidar_seg", "6ae0449c6ce07cfbf775b7c4", "68e8d3202e316da74b8189cc"},
 		{"4D", "platform_bug", "PSD", "6ae0449c6ce07cfbf775b7c4", "6889c08f7c2784422c96ae0f"},

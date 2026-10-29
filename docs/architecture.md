@@ -4,7 +4,7 @@
 
 ## 1. 目标与边界
 
-服务接收自建 Sentry 的 Issue webhook，从指定组织和项目读取 User Feedback 的 Issue、Event，在固定的 Teambition 项目创建反馈任务，按配置写入四类标签，并仅对平台异常指定一名负责人。第一版不查询、下载或上传截图；任务备注保留反馈原文、Sentry 链接及可选用户名。目标 Sentry 项目由 `SENTRY_PROJECT` 配置。业务键仍是 Sentry Issue ID：同一 Issue 的重复投递只产生一个作业，本次分类改造不迁移数据库或自动重放历史作业。
+服务接收自建 Sentry 的 Issue webhook，从指定组织和项目读取 User Feedback 的 Issue、Event，在固定的 Teambition 项目创建反馈任务，按配置写入四类标签；平台异常按任务类型匹配一名负责人，数据问题和需求建议各使用一名固定负责人，其他类别不指派。第一版不查询、下载或上传截图；任务备注保留反馈原文、Sentry 链接及可选用户名。目标 Sentry 项目由 `SENTRY_PROJECT` 配置。业务键仍是 Sentry Issue ID：同一 Issue 的重复投递只产生一个作业，本次分类改造不迁移数据库或自动重放历史作业。
 
 已知 Sentry Internal Integration 配置了 https://sentry-adapter.gwm-adas.com/webhooks/sentry/user-feedback，订阅 Issue webhook；实际 FEEDBACK 类 issue.created 是否投递仍要在目标 Sentry 26.6 实例验证。解析器也支持 event_alert.triggered，但当前未配置 Alert Rule Action。
 
@@ -32,8 +32,8 @@ flowchart LR
 
 1. **接收与验签。** POST /webhooks/sentry/user-feedback 限制 JSON 请求体为 1 MiB，以原始字节和 Sentry-Hook-Signature 做 HMAC-SHA256 验证。解析器只接收 FEEDBACK 类 issue.created 或符合条件的 event_alert.triggered；其他已验签投递返回 204。Sentry Webhook 的[签名和响应时限](https://docs.sentry.io/integrations/integration-platform/webhooks/)以及 [Issue FEEDBACK 事件](https://docs.sentry.io/integrations/integration-platform/webhooks/issues/)是此入口的协议依据。
 2. **持久化后应答。** 对接收的事件生成 issue:<issue_id> 去重键，向 feedback_jobs 做唯一键插入；重复投递命中 ON CONFLICT DO NOTHING。写入成功或已存在后返回 202，数据库写入失败返回 503。没有独立 webhook_inbox，也没有把原始反馈正文写入数据库。Sentry 对失败响应是否重投仍需实测。
-3. **领取并核实反馈。** worker 每秒尝试领取一个 pending/retry 作业，SQL 使用 FOR UPDATE SKIP LOCKED，并记录 attempts 与 10 分钟租约。worker 查询 Sentry Issue 与 Event API 核实类别及项目，再从反馈上下文或事件 tags 取分类、`taskType`、`dataset_id` 和正文。非目标项目或非反馈 Issue 标为 ignored；正文或链接缺失仍进入 needs_review。缺少任务类型或数据集不阻止建卡，使用标题兜底；任务类型缺失时不指派。
-4. **转换与路由。** `content` 使用 `【{taskType}: {dataset_id}】 {问题描述摘要}`，提取 `[问题描述]` 后内容，删除图片和链接地址、合并空白并截断；原始正文不做标题清洗。`internal/routing` 根据独立配置解析四类标签及单人负责人：只有 `platform_bug` 查任务类型，旧 `feature_gap` 或未知分类归 `other` 并记录待分流原因。`note` 保留原文、Sentry 反馈链接和可选用户名。用户名先取 Issue `metadata.name`，再取 Event `contexts.feedback.name`；反馈链接继续沿用当前 Sentry UI 深链接逻辑。第一版不查询、下载或上传截图。
+3. **领取并核实反馈。** worker 每秒尝试领取一个 pending/retry 作业，SQL 使用 FOR UPDATE SKIP LOCKED，并记录 attempts 与 10 分钟租约。worker 查询 Sentry Issue 与 Event API 核实类别及项目，再从反馈上下文或事件 tags 取分类、`taskType`、`dataset_id` 和正文。非目标项目或非反馈 Issue 标为 ignored；正文或链接缺失仍进入 needs_review。缺少任务类型或数据集不阻止建卡，使用标题兜底；平台异常缺少任务类型时不指派，数据问题和需求建议仍可使用固定负责人。
+4. **转换与路由。** `content` 使用 `【{taskType}: {dataset_id}】 {问题描述摘要}`，提取 `[问题描述]` 后内容，删除图片和链接地址、合并空白并截断；原始正文不做标题清洗。`internal/routing` 根据独立配置解析四类标签及单人负责人：只有 `platform_bug` 查任务类型，`data_issue` 和 `suggestion` 读取 `categoryOwners` 的固定负责人；旧 `feature_gap` 或未知分类归 `other` 并记录待分流原因，不执行自动指派。`note` 保留原文、Sentry 反馈链接和可选用户名。用户名先取 Issue `metadata.name`，再取 Event `contexts.feedback.name`；反馈链接继续沿用当前 Sentry UI 深链接逻辑。第一版不查询、下载或上传截图。
 5. **鉴权后建卡。** worker 调用 Teambition.Prepare：真实模式按需获取并缓存 appToken（或按配置在本地签发 JWT），不会准备图片。Prepare 成功后，数据库由 processing 转为 creating，才发送任务创建请求。若取 token 失败，作业仍在尚未发建卡请求的 processing 阶段重试或进入 needs_review。
 6. **确认结果。** Teambition 返回明确 task ID 且数据库成功写入后才置为 done。建卡请求超时、网络错误、5xx、响应不完整或 task ID 缺失时进入 uncertain；此状态不会被 worker 自动再次领取。明确的永久错误进入 needs_review。若创建成功但保存 task ID 失败，creating 租约过期后同样转 uncertain，防止盲目再建卡。
 
@@ -54,7 +54,7 @@ flowchart LR
 
 HTTP 路由实际为 POST /webhooks/sentry/user-feedback、GET /health/live（进程存活）和 GET /health/ready（数据库 Ping）。当前没有 /healthz、/readyz、人工重放或管理 API。readiness 只检查数据库连接，不对 Sentry/Teambition 做主动探测。
 
-路由配置保存在 `config/feedback-routing.json`，通过 `FEEDBACK_ROUTING_FILE` 加载。Compose 只读挂载该文件，适用于 scratch 运行镜像；修改后重启 adapter，不在运行中热更新。配置必须覆盖四类标签，负责人仅允许单个用户 ID；重复任务类型（忽略大小写及首尾空格）、无效 ID 或未知字段都会阻止启动。`TEAMBITION_EXECUTOR_ID` 不再参与卡片指派。`tagIds` 与既有“标注平台”下拉 `customfields` 独立，共用任务场景仍由 `TEAMBITION_SCENARIO_ID` 提供。
+路由配置保存在 `config/feedback-routing.json`，通过 `FEEDBACK_ROUTING_FILE` 加载。Compose 只读挂载该文件，适用于 scratch 运行镜像；修改后重启 adapter，不在运行中热更新。配置必须覆盖四类标签，负责人仅允许单个用户 ID；`categoryOwners` 只允许配置 `data_issue`、`suggestion`，不覆盖平台品类映射，也不为其他类别指派。重复任务类型（忽略大小写及首尾空格）、无效 ID 或未知字段都会阻止启动。旧配置省略固定负责人时仍可加载，相关类别保持未指派并记录待分流原因。`TEAMBITION_EXECUTOR_ID` 不再参与卡片指派。`tagIds` 与既有“标注平台”下拉 `customfields` 独立，共用任务场景仍由 `TEAMBITION_SCENARIO_ID` 提供。
 
 ## 5. 第一版数据模型与状态机
 

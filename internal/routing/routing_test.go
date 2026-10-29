@@ -16,6 +16,10 @@ func validConfig() fileConfig {
 			"suggestion":   strings.Repeat("3", 24),
 			"other":        strings.Repeat("4", 24),
 		},
+		CategoryOwners: map[string]string{
+			"data_issue": strings.Repeat("6", 24),
+			"suggestion": strings.Repeat("7", 24),
+		},
 		Owners: []ownerConfig{{Name: "Owner", ExecutorID: strings.Repeat("9", 24), TaskTypes: []string{"OD"}}},
 	}
 }
@@ -45,8 +49,10 @@ func TestResolveCategoryAndSingleOwner(t *testing.T) {
 	}{
 		{"platform", "platform_bug", "OD", "platform_bug", true, false},
 		{"normalized case and whitespace", " PLATFORM_BUG ", " od ", "platform_bug", true, false},
-		{"data does not assign", "data_issue", "OD", "data_issue", false, false},
-		{"suggestion does not assign", "suggestion", "OD", "suggestion", false, false},
+		{"data ignores task owner", "data_issue", "OD", "data_issue", false, false},
+		{"suggestion ignores task owner", "suggestion", "OD", "suggestion", false, false},
+		{"data missing task", "data_issue", "", "data_issue", false, false},
+		{"suggestion unconfigured task", "suggestion", "PD_label", "suggestion", false, false},
 		{"other does not assign", "other", "OD", "other", false, false},
 		{"legacy ambiguity", "feature_gap", "OD", "other", false, true},
 		{"unknown category", "new_category", "OD", "other", false, true},
@@ -64,7 +70,7 @@ func TestResolveCategoryAndSingleOwner(t *testing.T) {
 			if got.FeedbackType != tc.wantType || got.TagID != config.FeedbackTags[tc.wantType] {
 				t.Errorf("category/tag = %q/%q", got.FeedbackType, got.TagID)
 			}
-			wantOwner := ""
+			wantOwner := config.CategoryOwners[tc.wantType]
 			if tc.assigned {
 				wantOwner = config.Owners[0].ExecutorID
 			}
@@ -89,6 +95,12 @@ func TestLoadRejectsInvalidRouting(t *testing.T) {
 		{"empty tag", func(c *fileConfig) { c.FeedbackTags["other"] = "" }},
 		{"invalid tag", func(c *fileConfig) { c.FeedbackTags["other"] = "not-an-id" }},
 		{"duplicate tag", func(c *fileConfig) { c.FeedbackTags["other"] = c.FeedbackTags["data_issue"] }},
+		{"unknown fixed category", func(c *fileConfig) { c.CategoryOwners["unknown"] = strings.Repeat("8", 24) }},
+		{"platform cannot override task owners", func(c *fileConfig) { c.CategoryOwners["platform_bug"] = strings.Repeat("8", 24) }},
+		{"other remains unassigned", func(c *fileConfig) { c.CategoryOwners["other"] = strings.Repeat("8", 24) }},
+		{"empty fixed owner", func(c *fileConfig) { c.CategoryOwners["data_issue"] = "" }},
+		{"invalid fixed owner", func(c *fileConfig) { c.CategoryOwners["data_issue"] = "not-an-id" }},
+		{"multiple fixed owners", func(c *fileConfig) { c.CategoryOwners["data_issue"] += "," + strings.Repeat("8", 24) }},
 		{"empty owner name", func(c *fileConfig) { c.Owners[0].Name = " " }},
 		{"empty owner ID", func(c *fileConfig) { c.Owners[0].ExecutorID = "" }},
 		{"multiple owner IDs", func(c *fileConfig) {
@@ -163,9 +175,38 @@ func TestDeploymentConfigContainsApprovedOwners(t *testing.T) {
 			t.Errorf("owner for %s = %s, want %s", tc.taskType, got.ExecutorID, tc.executorID)
 		}
 	}
-	for _, kind := range []string{"data_issue", "suggestion", "other", "feature_gap"} {
+	for _, kind := range []string{"other", "feature_gap"} {
 		if got := rules.Resolve(kind, "OD"); got.ExecutorID != "" {
 			t.Errorf("non-platform feedback %s unexpectedly has an owner", kind)
+		}
+	}
+	for kind, owner := range map[string]string{
+		"data_issue": "68707b9783c2517553ea6203",
+		"suggestion": "6a277b7030ff5045c8d8bfd8",
+	} {
+		for _, taskType := range []string{"OD", "Lidar_seg", "PD_label", ""} {
+			if got := rules.Resolve(kind, taskType); got.ExecutorID != owner || got.ReviewReason != "" {
+				t.Errorf("fixed owner for %s/%s = %q (%s), want %s", kind, taskType, got.ExecutorID, got.ReviewReason, owner)
+			}
+		}
+	}
+}
+
+func TestOlderConfigurationWithoutFixedOwnersRemainsLoadable(t *testing.T) {
+	config := validConfig()
+	config.CategoryOwners = nil
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := Load(writeConfig(t, encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"data_issue", "suggestion"} {
+		got := rules.Resolve(kind, "OD")
+		if got.ExecutorID != "" || got.ReviewReason == "" {
+			t.Errorf("missing fixed owner must not fall back to a platform owner: %+v", got)
 		}
 	}
 }

@@ -17,8 +17,9 @@ var identifierPattern = regexp.MustCompile(`^[a-fA-F0-9]{24}$`)
 var feedbackTypes = [...]string{"platform_bug", "data_issue", "suggestion", "other"}
 
 type fileConfig struct {
-	FeedbackTags map[string]string `json:"feedbackTags"`
-	Owners       []ownerConfig     `json:"owners"`
+	FeedbackTags   map[string]string `json:"feedbackTags"`
+	CategoryOwners map[string]string `json:"categoryOwners,omitempty"`
+	Owners         []ownerConfig     `json:"owners"`
 }
 
 type ownerConfig struct {
@@ -30,8 +31,9 @@ type ownerConfig struct {
 // Rules is compiled once at startup. Resolve only reads these maps, so a config
 // change takes effect after restarting the adapter, never midway through a job.
 type Rules struct {
-	feedbackTags map[string]string
-	owners       map[string]string
+	feedbackTags   map[string]string
+	categoryOwners map[string]string
+	owners         map[string]string
 }
 
 type Decision struct {
@@ -65,13 +67,32 @@ func compile(config fileConfig) (*Rules, error) {
 	if err != nil {
 		return nil, err
 	}
+	categoryOwners, err := validateCategoryOwners(config.CategoryOwners)
+	if err != nil {
+		return nil, err
+	}
 	owners := make(map[string]string)
 	for index, owner := range config.Owners {
 		if err := addOwner(owners, owner); err != nil {
 			return nil, fmt.Errorf("feedback owner %d: %w", index+1, err)
 		}
 	}
-	return &Rules{feedbackTags: tags, owners: owners}, nil
+	return &Rules{feedbackTags: tags, categoryOwners: categoryOwners, owners: owners}, nil
+}
+
+func validateCategoryOwners(input map[string]string) (map[string]string, error) {
+	owners := make(map[string]string, len(input))
+	for kind, value := range input {
+		if kind != "data_issue" && kind != "suggestion" {
+			return nil, fmt.Errorf("categoryOwners.%s is unsupported; only data_issue and suggestion allow fixed owners", kind)
+		}
+		id := strings.TrimSpace(value)
+		if !identifierPattern.MatchString(id) {
+			return nil, fmt.Errorf("categoryOwners.%s must be one 24-character hexadecimal user ID", kind)
+		}
+		owners[kind] = id
+	}
+	return owners, nil
 }
 
 func validateTags(input map[string]string) (map[string]string, error) {
@@ -126,8 +147,15 @@ func (r *Rules) Resolve(feedbackType, taskType string) Decision {
 		return decision
 	}
 	decision.TagID = r.feedbackTags[kind]
-	// Business category controls assignment; legacy bug/feature scenario choices
-	// must never assign data issues, suggestions, or ambiguous feature gaps.
+	// Fixed category owners do not depend on task metadata. Platform faults keep
+	// their task-type routing; ambiguous legacy feature gaps remain unassigned.
+	if kind == "data_issue" || kind == "suggestion" {
+		decision.ExecutorID = r.categoryOwners[kind]
+		if decision.ExecutorID == "" {
+			decision.ReviewReason = "feedback category has no configured fixed owner; assignment requires manual triage"
+		}
+		return decision
+	}
 	if kind != "platform_bug" {
 		return decision
 	}

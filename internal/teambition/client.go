@@ -169,10 +169,13 @@ func (c *Client) Create(ctx context.Context, card Card) (string, error) {
 	if len(card.TagIDs) > 0 {
 		request["tagIds"] = card.TagIDs
 	}
-	// A global default must not assign data issues, suggestions, or unclassified
-	// feedback. Only an explicitly routed platform bug can have an executor.
-	if card.FeedbackType == "platform_bug" && strings.TrimSpace(card.ExecutorID) != "" {
-		request["executorId"] = strings.TrimSpace(card.ExecutorID)
+	// Assignment comes from the routing configuration, never a global default.
+	// Other and unclassified feedback remain unassigned even if passed an executor.
+	switch card.FeedbackType {
+	case "platform_bug", "data_issue", "suggestion":
+		if executorID := strings.TrimSpace(card.ExecutorID); executorID != "" {
+			request["executorId"] = executorID
+		}
 	}
 	customFields := make([]any, 0, 2)
 	if c.cfg.CustomFieldID != "" {
