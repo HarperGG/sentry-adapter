@@ -17,13 +17,27 @@ var (
 	bareResourceURL   = regexp.MustCompile(`(?i)(?:https?://|ftp://|cos://|s3://|www\.|blob:|data:|//)[^\s<>"'，。；！？、）】》]+`)
 )
 
-func title(taskType, datasetID, message string) string {
+func title(feedbackType, taskType, datasetID, message string) string {
 	summary := feedbackSummary(message)
+	label := feedbackTypeLabel(feedbackType) + "："
 	metadata := titleMetadata(taskType, "未知任务类型") + ": " + titleMetadata(datasetID, "未知数据集")
 	// Reserve room for the actual problem even if malformed task metadata is
 	// unusually long. The adapter's existing 100-rune title cap remains in force.
-	metadata = truncateRunes(metadata, maxTitleRunes-len([]rune(summary))-len([]rune("【】 ")))
-	return "【" + metadata + "】 " + summary
+	metadata = truncateRunes(metadata, maxTitleRunes-len([]rune(summary))-len([]rune(label))-len([]rune("【】")))
+	return "【" + metadata + "】" + label + summary
+}
+
+func feedbackTypeLabel(feedbackType string) string {
+	switch feedbackType {
+	case "platform_bug":
+		return "平台异常"
+	case "data_issue":
+		return "数据问题"
+	case "suggestion":
+		return "需求建议"
+	default:
+		return "其他"
+	}
 }
 
 func titleMetadata(value, fallback string) string {

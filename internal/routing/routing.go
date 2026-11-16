@@ -17,9 +17,12 @@ var identifierPattern = regexp.MustCompile(`^[a-fA-F0-9]{24}$`)
 var feedbackTypes = [...]string{"platform_bug", "data_issue", "suggestion", "other"}
 
 type fileConfig struct {
-	FeedbackTags   map[string]string `json:"feedbackTags"`
-	CategoryOwners map[string]string `json:"categoryOwners,omitempty"`
-	Owners         []ownerConfig     `json:"owners"`
+	FeedbackTags              map[string]string `json:"feedbackTags"`
+	EnvironmentTags           map[string]string `json:"environmentTags,omitempty"`
+	CategoryOwners            map[string]string `json:"categoryOwners,omitempty"`
+	DefaultPlatformExecutorID string            `json:"defaultPlatformExecutorId"`
+	Owners                    []ownerConfig     `json:"owners"`
+	SuggestionOwners          []ownerConfig     `json:"suggestionOwners,omitempty"`
 }
 
 type ownerConfig struct {
@@ -31,16 +34,20 @@ type ownerConfig struct {
 // Rules is compiled once at startup. Resolve only reads these maps, so a config
 // change takes effect after restarting the adapter, never midway through a job.
 type Rules struct {
-	feedbackTags   map[string]string
-	categoryOwners map[string]string
-	owners         map[string]string
+	feedbackTags              map[string]string
+	environmentTags           map[string]string
+	categoryOwners            map[string]string
+	defaultPlatformExecutorID string
+	owners                    map[string]string
+	suggestionOwners          map[string]string
 }
 
 type Decision struct {
-	FeedbackType string
-	TagID        string
-	ExecutorID   string
-	ReviewReason string
+	FeedbackType     string
+	TagID            string
+	EnvironmentTagID string
+	ExecutorID       string
+	ReviewReason     string
 }
 
 func Load(path string) (*Rules, error) {
@@ -67,9 +74,17 @@ func compile(config fileConfig) (*Rules, error) {
 	if err != nil {
 		return nil, err
 	}
+	environmentTags, err := validateEnvironmentTags(config.EnvironmentTags)
+	if err != nil {
+		return nil, err
+	}
 	categoryOwners, err := validateCategoryOwners(config.CategoryOwners)
 	if err != nil {
 		return nil, err
+	}
+	defaultPlatformExecutorID := strings.TrimSpace(config.DefaultPlatformExecutorID)
+	if !identifierPattern.MatchString(defaultPlatformExecutorID) {
+		return nil, errors.New("defaultPlatformExecutorId must be one 24-character hexadecimal user ID")
 	}
 	owners := make(map[string]string)
 	for index, owner := range config.Owners {
@@ -77,7 +92,39 @@ func compile(config fileConfig) (*Rules, error) {
 			return nil, fmt.Errorf("feedback owner %d: %w", index+1, err)
 		}
 	}
-	return &Rules{feedbackTags: tags, categoryOwners: categoryOwners, owners: owners}, nil
+	suggestionOwners := make(map[string]string)
+	for index, owner := range config.SuggestionOwners {
+		if err := addOwner(suggestionOwners, owner); err != nil {
+			return nil, fmt.Errorf("suggestion owner %d: %w", index+1, err)
+		}
+	}
+	return &Rules{
+		feedbackTags: tags, environmentTags: environmentTags, categoryOwners: categoryOwners,
+		defaultPlatformExecutorID: defaultPlatformExecutorID,
+		owners:                    owners, suggestionOwners: suggestionOwners,
+	}, nil
+}
+
+func validateEnvironmentTags(input map[string]string) (map[string]string, error) {
+	tags := make(map[string]string, len(input))
+	for cloudServer, value := range input {
+		key := strings.ToUpper(strings.TrimSpace(cloudServer))
+		if key == "" {
+			return nil, errors.New("environmentTags must not contain an empty cloud server")
+		}
+		if key != "TC" && key != "HS" {
+			return nil, fmt.Errorf("environmentTags.%s is unsupported; only TC and HS cloud servers are supported", cloudServer)
+		}
+		if _, exists := tags[key]; exists {
+			return nil, fmt.Errorf("cloud server %q has more than one tag entry", cloudServer)
+		}
+		id := strings.TrimSpace(value)
+		if !identifierPattern.MatchString(id) {
+			return nil, fmt.Errorf("environmentTags.%s must be a 24-character hexadecimal tag ID", cloudServer)
+		}
+		tags[key] = id
+	}
+	return tags, nil
 }
 
 func validateCategoryOwners(input map[string]string) (map[string]string, error) {
@@ -139,7 +186,7 @@ func addOwner(owners map[string]string, owner ownerConfig) error {
 	return nil
 }
 
-func (r *Rules) Resolve(feedbackType, taskType string) Decision {
+func (r *Rules) Resolve(feedbackType, taskType, cloudServer string) Decision {
 	kind, reason := normalizeFeedbackType(feedbackType)
 	decision := Decision{FeedbackType: kind, ReviewReason: reason}
 	if r == nil {
@@ -147,10 +194,16 @@ func (r *Rules) Resolve(feedbackType, taskType string) Decision {
 		return decision
 	}
 	decision.TagID = r.feedbackTags[kind]
-	// Fixed category owners do not depend on task metadata. Platform faults keep
-	// their task-type routing; ambiguous legacy feature gaps remain unassigned.
+	decision.EnvironmentTagID = r.environmentTags[strings.ToUpper(strings.TrimSpace(cloudServer))]
+	// Suggestion ownership is separate from platform ownership. Its fixed
+	// category owner handles unknown task types and missing task metadata.
 	if kind == "data_issue" || kind == "suggestion" {
-		decision.ExecutorID = r.categoryOwners[kind]
+		if kind == "suggestion" {
+			decision.ExecutorID = r.suggestionOwners[normalize(taskType)]
+		}
+		if decision.ExecutorID == "" {
+			decision.ExecutorID = r.categoryOwners[kind]
+		}
 		if decision.ExecutorID == "" {
 			decision.ReviewReason = "feedback category has no configured fixed owner; assignment requires manual triage"
 		}
@@ -161,10 +214,8 @@ func (r *Rules) Resolve(feedbackType, taskType string) Decision {
 	}
 	key := normalize(taskType)
 	decision.ExecutorID = r.owners[key]
-	if key == "" {
-		decision.ReviewReason = "platform feedback has no task type; assignment requires manual triage"
-	} else if decision.ExecutorID == "" {
-		decision.ReviewReason = "platform task type has no configured owner; assignment requires manual triage"
+	if decision.ExecutorID == "" {
+		decision.ExecutorID = r.defaultPlatformExecutorID
 	}
 	return decision
 }
