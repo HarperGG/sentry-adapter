@@ -20,7 +20,10 @@ func validConfig() fileConfig {
 			"data_issue": strings.Repeat("6", 24),
 			"suggestion": strings.Repeat("7", 24),
 		},
-		Owners: []ownerConfig{{Name: "Owner", ExecutorID: strings.Repeat("9", 24), TaskTypes: []string{"OD"}}},
+		DefaultPlatformExecutorID: strings.Repeat("8", 24),
+		Owners:                    []ownerConfig{{Name: "Owner", ExecutorID: strings.Repeat("9", 24), TaskTypes: []string{"OD"}}},
+		SuggestionOwners:          []ownerConfig{{Name: "Suggestion owner", ExecutorID: strings.Repeat("a", 24), TaskTypes: []string{"Lidar_seg"}}},
+		EnvironmentTags:           map[string]string{"TC": strings.Repeat("b", 24), "HS": strings.Repeat("c", 24)},
 	}
 }
 
@@ -45,37 +48,39 @@ func TestResolveCategoryAndSingleOwner(t *testing.T) {
 	}
 	cases := []struct {
 		name, feedbackType, taskType, wantType string
-		assigned, review                       bool
+		wantOwner                              string
+		review                                 bool
 	}{
-		{"platform", "platform_bug", "OD", "platform_bug", true, false},
-		{"normalized case and whitespace", " PLATFORM_BUG ", " od ", "platform_bug", true, false},
-		{"data ignores task owner", "data_issue", "OD", "data_issue", false, false},
-		{"suggestion ignores task owner", "suggestion", "OD", "suggestion", false, false},
-		{"data missing task", "data_issue", "", "data_issue", false, false},
-		{"suggestion unconfigured task", "suggestion", "PD_label", "suggestion", false, false},
-		{"other does not assign", "other", "OD", "other", false, false},
-		{"legacy ambiguity", "feature_gap", "OD", "other", false, true},
-		{"unknown category", "new_category", "OD", "other", false, true},
-		{"missing category", "", "OD", "other", false, true},
-		{"legacy bug", "bug", "OD", "platform_bug", true, false},
-		{"legacy defect", "defect", "OD", "platform_bug", true, false},
-		{"legacy feature", "feature", "OD", "suggestion", false, false},
-		{"legacy request", "request", "OD", "suggestion", false, false},
-		{"unconfigured task", "platform_bug", "PD_label", "platform_bug", false, true},
-		{"missing task", "platform_bug", "", "platform_bug", false, true},
+		{"platform", "platform_bug", "OD", "platform_bug", config.Owners[0].ExecutorID, false},
+		{"normalized case and whitespace", " PLATFORM_BUG ", " od ", "platform_bug", config.Owners[0].ExecutorID, false},
+		{"data ignores platform owner", "data_issue", "OD", "data_issue", config.CategoryOwners["data_issue"], false},
+		{"data ignores suggestion owner", "data_issue", "Lidar_seg", "data_issue", config.CategoryOwners["data_issue"], false},
+		{"data missing task", "data_issue", "", "data_issue", config.CategoryOwners["data_issue"], false},
+		{"suggestion uses separate task owner", "suggestion", "Lidar_seg", "suggestion", config.SuggestionOwners[0].ExecutorID, false},
+		{"suggestion normalizes task and category", " SUGGESTION ", " lidar_SEG ", "suggestion", config.SuggestionOwners[0].ExecutorID, false},
+		{"suggestion ignores platform owner", "suggestion", "OD", "suggestion", config.CategoryOwners["suggestion"], false},
+		{"suggestion unconfigured task", "suggestion", "PD_label", "suggestion", config.CategoryOwners["suggestion"], false},
+		{"suggestion missing task", "suggestion", "", "suggestion", config.CategoryOwners["suggestion"], false},
+		{"other does not assign", "other", "OD", "other", "", false},
+		{"legacy ambiguity", "feature_gap", "Lidar_seg", "other", "", true},
+		{"unknown category", "new_category", "OD", "other", "", true},
+		{"missing category", "", "OD", "other", "", true},
+		{"legacy bug", "bug", "OD", "platform_bug", config.Owners[0].ExecutorID, false},
+		{"legacy defect", "defect", "OD", "platform_bug", config.Owners[0].ExecutorID, false},
+		{"legacy feature", "feature", "Lidar_seg", "suggestion", config.SuggestionOwners[0].ExecutorID, false},
+		{"legacy request", "request", "OD", "suggestion", config.CategoryOwners["suggestion"], false},
+		{"unconfigured platform task", "platform_bug", "PD_label", "platform_bug", config.DefaultPlatformExecutorID, false},
+		{"platform does not reuse suggestion owner", "platform_bug", "Lidar_seg", "platform_bug", config.DefaultPlatformExecutorID, false},
+		{"missing platform task", "platform_bug", "", "platform_bug", config.DefaultPlatformExecutorID, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := rules.Resolve(tc.feedbackType, tc.taskType)
+			got := rules.Resolve(tc.feedbackType, tc.taskType, "")
 			if got.FeedbackType != tc.wantType || got.TagID != config.FeedbackTags[tc.wantType] {
 				t.Errorf("category/tag = %q/%q", got.FeedbackType, got.TagID)
 			}
-			wantOwner := config.CategoryOwners[tc.wantType]
-			if tc.assigned {
-				wantOwner = config.Owners[0].ExecutorID
-			}
-			if got.ExecutorID != wantOwner || (got.ReviewReason != "") != tc.review {
-				t.Errorf("owner/review = %q/%q, want %q/review=%t", got.ExecutorID, got.ReviewReason, wantOwner, tc.review)
+			if got.ExecutorID != tc.wantOwner || (got.ReviewReason != "") != tc.review {
+				t.Errorf("owner/review = %q/%q, want %q/review=%t", got.ExecutorID, got.ReviewReason, tc.wantOwner, tc.review)
 			}
 		})
 	}
@@ -101,6 +106,16 @@ func TestLoadRejectsInvalidRouting(t *testing.T) {
 		{"empty fixed owner", func(c *fileConfig) { c.CategoryOwners["data_issue"] = "" }},
 		{"invalid fixed owner", func(c *fileConfig) { c.CategoryOwners["data_issue"] = "not-an-id" }},
 		{"multiple fixed owners", func(c *fileConfig) { c.CategoryOwners["data_issue"] += "," + strings.Repeat("8", 24) }},
+		{"missing platform fallback", func(c *fileConfig) { c.DefaultPlatformExecutorID = "" }},
+		{"invalid platform fallback", func(c *fileConfig) { c.DefaultPlatformExecutorID = "not-an-id" }},
+		{"multiple platform fallbacks", func(c *fileConfig) { c.DefaultPlatformExecutorID += "," + strings.Repeat("8", 24) }},
+		{"empty cloud server", func(c *fileConfig) { c.EnvironmentTags[" "] = strings.Repeat("b", 24) }},
+		{"empty cloud tag", func(c *fileConfig) { c.EnvironmentTags["TC"] = "" }},
+		{"invalid cloud tag", func(c *fileConfig) { c.EnvironmentTags["TC"] = "not-an-id" }},
+		{"multiple cloud tags", func(c *fileConfig) { c.EnvironmentTags["TC"] += "," + strings.Repeat("c", 24) }},
+		{"duplicate normalized cloud server", func(c *fileConfig) { c.EnvironmentTags[" tc "] = strings.Repeat("c", 24) }},
+		{"deployment environment is not a cloud server", func(c *fileConfig) { c.EnvironmentTags["production"] = strings.Repeat("c", 24) }},
+		{"cloud name is not a server code", func(c *fileConfig) { c.EnvironmentTags["tencent"] = strings.Repeat("b", 24) }},
 		{"empty owner name", func(c *fileConfig) { c.Owners[0].Name = " " }},
 		{"empty owner ID", func(c *fileConfig) { c.Owners[0].ExecutorID = "" }},
 		{"multiple owner IDs", func(c *fileConfig) {
@@ -111,6 +126,16 @@ func TestLoadRejectsInvalidRouting(t *testing.T) {
 		{"duplicate in group", func(c *fileConfig) { c.Owners[0].TaskTypes = []string{"OD", " od "} }},
 		{"duplicate across groups", func(c *fileConfig) {
 			c.Owners = append(c.Owners, ownerConfig{Name: "Another", ExecutorID: strings.Repeat("8", 24), TaskTypes: []string{"od"}})
+		}},
+		{"empty suggestion owner name", func(c *fileConfig) { c.SuggestionOwners[0].Name = " " }},
+		{"empty suggestion owner ID", func(c *fileConfig) { c.SuggestionOwners[0].ExecutorID = "" }},
+		{"invalid suggestion owner ID", func(c *fileConfig) { c.SuggestionOwners[0].ExecutorID = "not-an-id" }},
+		{"multiple suggestion owner IDs", func(c *fileConfig) { c.SuggestionOwners[0].ExecutorID += "," + strings.Repeat("8", 24) }},
+		{"empty suggestion task list", func(c *fileConfig) { c.SuggestionOwners[0].TaskTypes = nil }},
+		{"empty suggestion task", func(c *fileConfig) { c.SuggestionOwners[0].TaskTypes = []string{" "} }},
+		{"duplicate suggestion task in group", func(c *fileConfig) { c.SuggestionOwners[0].TaskTypes = []string{"Lidar_seg", " lidar_SEG "} }},
+		{"duplicate suggestion task across groups", func(c *fileConfig) {
+			c.SuggestionOwners = append(c.SuggestionOwners, ownerConfig{Name: "Another", ExecutorID: strings.Repeat("8", 24), TaskTypes: []string{" LIDAR_SEG "}})
 		}},
 	}
 	for _, tc := range cases {
@@ -165,34 +190,30 @@ func TestDeploymentConfigContainsApprovedOwners(t *testing.T) {
 		{"Lane_map", "69ce485f652bf1ac6daa9b05"},
 		{"OD_check", "67c53de0c45defb1e0693426"},
 		{"TLR_4D", "67c53de0c45defb1e0693426"},
-		{"PD_label", ""},
-		{"Tagging", ""},
-		{"TSR_AS", ""},
-		{"OCC", ""},
+		{"PD_label", "6784ad2f4981b4ff9f939fe3"},
+		{"Tagging", "6784ad2f4981b4ff9f939fe3"},
+		{"TSR_AS", "6784ad2f4981b4ff9f939fe3"},
+		{"OCC", "6784ad2f4981b4ff9f939fe3"},
+		{"", "6784ad2f4981b4ff9f939fe3"},
 	}
 	for _, tc := range cases {
-		if got := rules.Resolve("platform_bug", tc.taskType); got.ExecutorID != tc.executorID {
-			t.Errorf("owner for %s = %s, want %s", tc.taskType, got.ExecutorID, tc.executorID)
+		if got := rules.Resolve("platform_bug", tc.taskType, ""); got.ExecutorID != tc.executorID || got.ReviewReason != "" {
+			t.Errorf("owner for %s = %s (%s), want %s", tc.taskType, got.ExecutorID, got.ReviewReason, tc.executorID)
 		}
 	}
 	for _, kind := range []string{"other", "feature_gap"} {
-		if got := rules.Resolve(kind, "OD"); got.ExecutorID != "" {
+		if got := rules.Resolve(kind, "OD", ""); got.ExecutorID != "" {
 			t.Errorf("non-platform feedback %s unexpectedly has an owner", kind)
 		}
 	}
-	for kind, owner := range map[string]string{
-		"data_issue": "68707b9783c2517553ea6203",
-		"suggestion": "6a277b7030ff5045c8d8bfd8",
-	} {
-		for _, taskType := range []string{"OD", "Lidar_seg", "PD_label", ""} {
-			if got := rules.Resolve(kind, taskType); got.ExecutorID != owner || got.ReviewReason != "" {
-				t.Errorf("fixed owner for %s/%s = %q (%s), want %s", kind, taskType, got.ExecutorID, got.ReviewReason, owner)
-			}
+	for _, taskType := range []string{"OD", "Lidar_seg", "PD_label", ""} {
+		if got := rules.Resolve("data_issue", taskType, ""); got.ExecutorID != "68707b9783c2517553ea6203" || got.ReviewReason != "" {
+			t.Errorf("data owner for %s = %q (%s)", taskType, got.ExecutorID, got.ReviewReason)
 		}
 	}
 }
 
-func TestOlderConfigurationWithoutFixedOwnersRemainsLoadable(t *testing.T) {
+func TestConfigurationWithoutFixedOwnersDoesNotUsePlatformOwners(t *testing.T) {
 	config := validConfig()
 	config.CategoryOwners = nil
 	encoded, err := json.Marshal(config)
@@ -204,9 +225,134 @@ func TestOlderConfigurationWithoutFixedOwnersRemainsLoadable(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, kind := range []string{"data_issue", "suggestion"} {
-		got := rules.Resolve(kind, "OD")
+		got := rules.Resolve(kind, "OD", "")
 		if got.ExecutorID != "" || got.ReviewReason == "" {
 			t.Errorf("missing fixed owner must not fall back to a platform owner: %+v", got)
 		}
+	}
+}
+
+func TestDeploymentSuggestionOwnersCoverEveryApprovedTaskType(t *testing.T) {
+	rules, err := Load(filepath.Join("..", "..", "config", "feedback-routing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := []struct {
+		owner     string
+		taskTypes []string
+	}{
+		{
+			"688b39a65ece6d764f3cac6d",
+			[]string{"Lidar_seg", "Lidar_seg_4D", "Driving_Lidar_seg", "TLR_4D"},
+		},
+		{
+			"6a277b7030ff5045c8d8bfd8",
+			[]string{
+				"PSD", "PSD_3D", "Freespace", "Freespace_3D", "Road_3D", "Driving_Lane", "Lane", "Marker", "Road_Topo", "HD_map",
+				"2D_seg", "CLF_2D", "PD_check", "Lane_check", "TSR", "TLR", "TLR_E2E", "LM_SRL", "Dst", "Common_2D",
+				"VLM_Marker", "VLM_Lane", "VLM_2D", "VLM_PSD", "VLM_Text", "VLM_Text_sequence", "VLA", "VLA_sequence", "Lane_map", "SD_map",
+				"OD", "OD_4D", "OD_correct", "OD_check", "Sim_od", "Sim_od_sod", "Occ_check", "Driving_Occ_check",
+			},
+		},
+	}
+	if len(rules.suggestionOwners) != 42 {
+		t.Errorf("suggestion task types = %d, want 42", len(rules.suggestionOwners))
+	}
+	for _, group := range groups {
+		for _, taskType := range group.taskTypes {
+			got := rules.Resolve("suggestion", " "+strings.ToUpper(taskType)+" ", "")
+			if got.ExecutorID != group.owner || got.ReviewReason != "" {
+				t.Errorf("suggestion owner for %s = %s (%s), want %s", taskType, got.ExecutorID, got.ReviewReason, group.owner)
+			}
+		}
+	}
+	for _, taskType := range []string{"PD_label", "Tagging", "TSR_AS", ""} {
+		got := rules.Resolve("suggestion", taskType, "")
+		if got.ExecutorID != "6a277b7030ff5045c8d8bfd8" || got.ReviewReason != "" {
+			t.Errorf("suggestion fallback for %s = %s (%s)", taskType, got.ExecutorID, got.ReviewReason)
+		}
+	}
+}
+
+func TestCloudTagIsIndependentOfCategoryAndOwner(t *testing.T) {
+	rules, err := compile(validConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"platform_bug", "data_issue", "suggestion", "other", "feature_gap", "future_type", ""} {
+		withoutCloud := rules.Resolve(kind, "OD", "")
+		for _, cloudServer := range []string{"TC", " tc ", " Tc "} {
+			got := rules.Resolve(kind, "OD", cloudServer)
+			if got.EnvironmentTagID != strings.Repeat("b", 24) {
+				t.Errorf("cloud tag for %s/%s = %s", kind, cloudServer, got.EnvironmentTagID)
+			}
+			got.EnvironmentTagID = ""
+			if got != withoutCloud {
+				t.Errorf("cloud changed category, owner, or review: got %+v, want %+v", got, withoutCloud)
+			}
+		}
+		for _, cloudServer := range []string{"", " ", "unknown", "production", "test", "pre", "staging", "腾讯", "腾讯云", "tencent", "tencentcloud", "火山", "火山云", "volcengine"} {
+			if got := rules.Resolve(kind, "OD", cloudServer); got.EnvironmentTagID != "" {
+				t.Errorf("non-server value %q got cloud tag %s", cloudServer, got.EnvironmentTagID)
+			}
+		}
+	}
+}
+
+func TestDeploymentCloudServerTags(t *testing.T) {
+	rules, err := Load(filepath.Join("..", "..", "config", "feedback-routing.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range []struct {
+		tagID   string
+		aliases []string
+	}{
+		{"6afaaa6ba182b75dece7c837", []string{"TC", "tc"}},
+		{"6afaaa7a77889592b04252ab", []string{"HS", "hs"}},
+	} {
+		for _, alias := range group.aliases {
+			got := rules.Resolve("other", "", " "+alias+" ")
+			if got.EnvironmentTagID != group.tagID {
+				t.Errorf("tag for %s = %s, want %s", alias, got.EnvironmentTagID, group.tagID)
+			}
+		}
+	}
+}
+
+func TestSuggestionTaskOwnerDoesNotRequireFixedFallback(t *testing.T) {
+	config := validConfig()
+	config.CategoryOwners = nil
+	config.EnvironmentTags = nil
+	rules, err := compile(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rules.Resolve("suggestion", "Lidar_seg", "TC")
+	if got.ExecutorID != config.SuggestionOwners[0].ExecutorID || got.ReviewReason != "" || got.EnvironmentTagID != "" {
+		t.Errorf("suggestion task owner with optional config omitted = %+v", got)
+	}
+}
+
+func TestOptionalSuggestionMappingAndNormalizedConfiguration(t *testing.T) {
+	config := validConfig()
+	config.SuggestionOwners = nil
+	config.DefaultPlatformExecutorID = " " + config.DefaultPlatformExecutorID + "\t"
+	config.EnvironmentTags = map[string]string{" tc ": " " + strings.Repeat("b", 24) + "\t"}
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules, err := Load(writeConfig(t, encoded))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := rules.Resolve("suggestion", "Lidar_seg", "TC")
+	if got.ExecutorID != config.CategoryOwners["suggestion"] || got.EnvironmentTagID != strings.Repeat("b", 24) || got.ReviewReason != "" {
+		t.Errorf("optional suggestion mapping with normalized cloud server config = %+v", got)
+	}
+	got = rules.Resolve("platform_bug", "unconfigured", "")
+	if got.ExecutorID != strings.Repeat("8", 24) || got.ReviewReason != "" {
+		t.Errorf("normalized platform fallback = %+v", got)
 	}
 }

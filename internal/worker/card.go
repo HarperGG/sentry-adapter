@@ -9,6 +9,10 @@ import (
 )
 
 func cardFromFeedback(f sentry.Feedback, decision routing.Decision) teambition.Card {
+	tagIDs := []string{decision.TagID}
+	if decision.EnvironmentTagID != "" && decision.EnvironmentTagID != decision.TagID {
+		tagIDs = append(tagIDs, decision.EnvironmentTagID)
+	}
 	description := strings.TrimSpace(f.Message) + "\n\n" + strings.TrimSpace(f.IssueURL)
 	username := strings.Join(strings.Fields(f.Username), " ")
 	if username != "" {
@@ -16,10 +20,10 @@ func cardFromFeedback(f sentry.Feedback, decision routing.Decision) teambition.C
 	}
 	return teambition.Card{
 		SourceIssueID: f.IssueID,
-		Title:         title(f.TaskType, f.DatasetID, f.Message),
+		Title:         title(decision.FeedbackType, f.TaskType, f.DatasetID, f.Message),
 		Description:   description,
 		FeedbackType:  decision.FeedbackType,
-		TagIDs:        []string{decision.TagID},
+		TagIDs:        tagIDs,
 		ExecutorID:    decision.ExecutorID,
 	}
 }

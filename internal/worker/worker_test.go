@@ -27,7 +27,7 @@ func TestCardPreservesOriginalFeedbackWithoutUploadingImages(t *testing.T) {
 	if card.Description != f.Message+"\n\n"+f.IssueURL+"\n\n用户名：admin" {
 		t.Errorf("description must preserve feedback, links, and username: %q", card.Description)
 	}
-	if card.Title != "【OD_correct: odc_0908-JGzm】 打开页面后无法保存" {
+	if card.Title != "【OD_correct: odc_0908-JGzm】平台异常：打开页面后无法保存" {
 		t.Errorf("title = %q", card.Title)
 	}
 	if card.SourceIssueID != f.IssueID || card.FeedbackType != "platform_bug" || card.ExecutorID != "owner" ||
@@ -45,7 +45,7 @@ func TestCardWithMissingMetadataStillHasDescriptionAndTitle(t *testing.T) {
 	if card.Description != "反馈内容\n\nhttps://sentry.example/issues/42/" {
 		t.Errorf("description = %q", card.Description)
 	}
-	if card.Title != "【未知任务类型: 未知数据集】 反馈内容" || card.ExecutorID != "" {
+	if card.Title != "【未知任务类型: 未知数据集】其他：反馈内容" || card.ExecutorID != "" {
 		t.Errorf("missing metadata should still produce an unassigned card: %+v", card)
 	}
 }
@@ -62,6 +62,9 @@ func TestConfiguredRoutingReachesTaskCreateRequest(t *testing.T) {
 		{"data missing task", "data_issue", "", "6ae048f9e39f6320c05f93d7", "68707b9783c2517553ea6203"},
 		{"data unconfigured task", "data_issue", "PD_label", "6ae048f9e39f6320c05f93d7", "68707b9783c2517553ea6203"},
 		{"suggestion", "suggestion", "OD", "6ae0490edcbd5c5e9e53d410", "6a277b7030ff5045c8d8bfd8"},
+		{"point cloud suggestion", "suggestion", "Lidar_seg", "6ae0490edcbd5c5e9e53d410", "688b39a65ece6d764f3cac6d"},
+		{"TLR 4D suggestion", "suggestion", "TLR_4D", "6ae0490edcbd5c5e9e53d410", "688b39a65ece6d764f3cac6d"},
+		{"normalized legacy suggestion", " FEATURE ", " lidar_SEG_4d ", "6ae0490edcbd5c5e9e53d410", "688b39a65ece6d764f3cac6d"},
 		{"suggestion missing task", "suggestion", "", "6ae0490edcbd5c5e9e53d410", "6a277b7030ff5045c8d8bfd8"},
 		{"suggestion unconfigured task", "suggestion", "PD_label", "6ae0490edcbd5c5e9e53d410", "6a277b7030ff5045c8d8bfd8"},
 		{"other", "other", "OD", "6ae04920131cc905fc5a7dac", ""},
@@ -69,8 +72,9 @@ func TestConfiguredRoutingReachesTaskCreateRequest(t *testing.T) {
 		{"4D", "platform_bug", "PSD", "6ae0449c6ce07cfbf775b7c4", "6889c08f7c2784422c96ae0f"},
 		{"2D case alias", "platform_bug", "vlm_text_sequence", "6ae0449c6ce07cfbf775b7c4", "69ce485f652bf1ac6daa9b05"},
 		{"OD", "platform_bug", "OD_4D", "6ae0449c6ce07cfbf775b7c4", "67c53de0c45defb1e0693426"},
-		{"unconfigured", "platform_bug", "PD_label", "6ae0449c6ce07cfbf775b7c4", ""},
-		{"missing metadata", "platform_bug", "", "6ae0449c6ce07cfbf775b7c4", ""},
+		{"TLR 4D platform", "platform_bug", "TLR_4D", "6ae0449c6ce07cfbf775b7c4", "67c53de0c45defb1e0693426"},
+		{"unconfigured", "platform_bug", "PD_label", "6ae0449c6ce07cfbf775b7c4", "6784ad2f4981b4ff9f939fe3"},
+		{"missing metadata", "platform_bug", "", "6ae0449c6ce07cfbf775b7c4", "6784ad2f4981b4ff9f939fe3"},
 		{"ambiguous legacy", "feature_gap", "OD", "6ae04920131cc905fc5a7dac", ""},
 		{"unknown", "future_type", "OD", "6ae04920131cc905fc5a7dac", ""},
 	}
@@ -103,7 +107,7 @@ func TestConfiguredRoutingReachesTaskCreateRequest(t *testing.T) {
 				Message:  "[反馈类型] 原始分类\n\n[问题描述]\n点击保存后没有响应 ![截图](/image.png)",
 				IssueURL: "https://sentry.example/issues/42/",
 			}
-			card := cardFromFeedback(feedback, rules.Resolve(feedback.Kind, feedback.TaskType))
+			card := cardFromFeedback(feedback, rules.Resolve(feedback.Kind, feedback.TaskType, feedback.CloudServer))
 			prepared, err := client.Prepare(context.Background(), card)
 			if err != nil {
 				t.Fatal(err)
@@ -132,8 +136,99 @@ func TestConfiguredRoutingReachesTaskCreateRequest(t *testing.T) {
 			if err := json.Unmarshal(request["note"], &note); err != nil {
 				t.Fatal(err)
 			}
-			if !strings.HasSuffix(content, "】 点击保存后没有响应") || !strings.Contains(note, feedback.Message) {
+			label := map[string]string{
+				"platform_bug": "平台异常", "data_issue": "数据问题", "suggestion": "需求建议", "other": "其他",
+			}[card.FeedbackType]
+			if !strings.HasSuffix(content, "】"+label+"：点击保存后没有响应") || !strings.Contains(note, feedback.Message) {
 				t.Errorf("title or original note changed: content=%q note=%q", content, note)
+			}
+		})
+	}
+}
+
+func TestSentryURLServerReachesTaskCreateRequest(t *testing.T) {
+	rules, err := routing.Load("../../config/feedback-routing.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, pageURL, sentryEnvironment, environmentTag string
+	}{
+		{"Tencent production", "https://annotation.gwm-adas.com/TSR_AS/?projectName=1794459873646TSR_AS-GWM-1112&datasetId=587137&id=6af5171a8ef23b5557adbd7b&requirement=6aa35dd6dc01ff159b6319ca&server=TC", "production", "6afaaa6ba182b75dece7c837"},
+		{"HS test", "https://annotation.gwm-adas.com/TLR_4D/?server=HS", "test", "6afaaa7a77889592b04252ab"},
+		{"lowercase HS preproduction", "https://annotation.gwm-adas.com/TLR_4D/?server=hs", "pre", "6afaaa7a77889592b04252ab"},
+		{"unknown server ignores cloud-like environment", "https://annotation.gwm-adas.com/TLR_4D/?server=unknown", "TC", ""},
+		{"missing server ignores cloud-like environment", "https://annotation.gwm-adas.com/TLR_4D/", "HS", ""},
+		{"missing page URL", "", "production", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var request struct {
+				Title      string   `json:"content"`
+				TagIDs     []string `json:"tagIds"`
+				ExecutorID string   `json:"executorId"`
+			}
+			createCalls := 0
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/api/0/organizations/acme/issues/42/":
+					_, _ = w.Write([]byte(`{"id":"42","issueCategory":"feedback","project":{"id":"5","slug":"web"}}`))
+				case "/api/0/organizations/acme/issues/42/events/oldest/":
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"eventID":     "event-1",
+						"environment": tc.sentryEnvironment,
+						"contexts": map[string]any{"feedback": map[string]string{
+							"message": "增加批量操作", "url": tc.pageURL,
+						}},
+						"tags": []map[string]string{
+							{"key": "feedback_type", "value": "suggestion"},
+							{"key": "task_type", "value": "TLR_4D"},
+							{"key": "dataset_id", "value": "dataset-1"},
+							{"key": "environment", "value": tc.sentryEnvironment},
+							{"key": "url", "value": "https://annotation.gwm-adas.com/TLR_4D/"},
+						},
+					})
+				case "/gateway/v3/task/create":
+					createCalls++
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Error(err)
+					}
+					_, _ = w.Write([]byte(`{"result":{"taskId":"created-task"}}`))
+				default:
+					t.Errorf("unexpected request path: %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			sentryClient, err := sentry.New(server.URL, "test-only-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			feedback, err := sentryClient.GetFeedback(context.Background(), "acme", "42", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := teambition.New(teambition.Config{
+				BaseURL: server.URL, TaskPath: "/gateway/v3/task/create", AuthMode: "local_jwt",
+				AppID: "test-app", AppSecret: "test-only-secret", ProjectID: "project", ScenarioID: "shared-scenario",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			card := cardFromFeedback(feedback, rules.Resolve(feedback.Kind, feedback.TaskType, feedback.CloudServer))
+			id, err := client.Create(context.Background(), card)
+			if err != nil || id != "created-task" || createCalls != 1 {
+				t.Fatalf("Create() = %q, %v, calls %d", id, err, createCalls)
+			}
+			wantTags := []string{"6ae0490edcbd5c5e9e53d410"}
+			if tc.environmentTag != "" {
+				wantTags = append(wantTags, tc.environmentTag)
+			}
+			if !reflect.DeepEqual(request.TagIDs, wantTags) {
+				t.Errorf("tagIds = %v, want %v", request.TagIDs, wantTags)
+			}
+			if request.ExecutorID != "688b39a65ece6d764f3cac6d" || request.Title != "【TLR_4D: dataset-1】需求建议：增加批量操作" {
+				t.Errorf("unexpected single executor or title: %+v", request)
 			}
 		})
 	}

@@ -8,8 +8,8 @@
 
 - `POST /webhooks/sentry/user-feedback`：对原始请求体验证 `Sentry-Hook-Signature`，过滤 `issue.created` 的 `FEEDBACK` 类别，也兼容 `event_alert.triggered`。当前 Sentry 配置使用的是前一种。
 - 先写 PostgreSQL 去重作业，再返回 `202`；后台 worker 只读取 Sentry Issue 和 Event，不查询或下载截图。
-- `content` 按 `【taskType: dataset_id】 问题描述摘要` 生成，从描述中删除图片与链接地址、合并空白，摘要最多 60 个字符、完整标题最多 100 个字符。`note` 保留反馈原文、Sentry 链接及可选用户名。任务类型或数据集缺失时使用“未知任务类型／未知数据集”，摘要无有效文字时使用“问题详情见反馈”；反馈正文或链接缺失仍进入 `needs_review`。
-- 通过独立 JSON 配置把 `platform_bug / data_issue / suggestion / other` 映射到四个 TB 分类标签；平台异常按 `task_type` 指派一名负责人，数据问题和需求建议分别指派给该类别配置的固定负责人，不依赖任务类型。旧 `feature_gap`、未知或缺失分类归“其他”并记录待分流原因，其他类别或未配置负责人仍建卡但不指派。
+- `content` 按 `【taskType: dataset_id】反馈分类：问题描述摘要` 生成，分类显示“平台异常／数据问题／需求建议／其他”。从描述中删除图片与链接地址、合并空白，摘要最多 60 个字符、完整标题最多 100 个字符。`note` 保留反馈原文、Sentry 链接及可选用户名。任务类型或数据集缺失时使用“未知任务类型／未知数据集”，摘要无有效文字时使用“问题详情见反馈”；反馈正文或链接缺失仍进入 `needs_review`。
+- 通过独立 JSON 配置把 `platform_bug / data_issue / suggestion / other` 映射到四个 TB 分类标签，并按反馈业务页面 URL 的 `server` 参数追加“腾讯云”或“火山云”标签。平台异常沿用四位任务类型负责人，未命中时指派张优为；需求建议使用独立的张莹莹／武欣媛任务类型映射，未命中时使用该类别的固定负责人；数据问题使用固定负责人。每张卡片最多一名执行人。旧 `feature_gap`、未知或缺失分类归“其他”并记录待分流原因，其他类别仍建卡但不指派。
 - Teambition 客户端默认向私有 `https://teambition.gwm.cn/gateway/appToken` POST `appId`、`appSecret`，缓存返回的 `appToken`，作为 `Authorization: Bearer <appToken>` 调用 `/gateway/v3/task/create`；距过期不足 100 秒时重新获取。可配置 `TEAMBITION_AUTH_MODE=local_jwt`，沿用本地签发 HS256 JWT 的方式。建卡 body 包含 `involveMembers`、`objectType=task`、共用场景 ID 和配置的下拉自定义字段；只有拿到明确 task ID 才记为成功。
 - `mock` 模式不会写入 Teambition；真实模式第一版不调用截图上传接口，也不把截图放进任务的文件自定义字段。上传辅助代码保留供后续联调，当前业务链路不会使用。
 - 建卡请求发出后发生超时、5xx 或响应不完整时进入 `uncertain`，不会自动再次建卡。
@@ -25,10 +25,10 @@ internal/sentry     Issue、Event 读取；截图辅助代码暂不使用
 internal/teambition 在线 appToken / 本地 JWT、建卡与 Mock；上传辅助代码暂不使用
 internal/store      PostgreSQL 作业与状态转换
 internal/worker     反馈过滤、转换、失败分类
-internal/routing    四类标签和单人负责人配置、校验与解析
+internal/routing    分类与环境标签和单人负责人配置、校验与解析
 docs/architecture.md 架构与上线清单
 config/credentials.env.example Teambition 应用凭据配置模板
-config/feedback-routing.json 四类反馈标签和品类负责人配置
+config/feedback-routing.json 分类与环境标签、品类负责人和兜底负责人配置
 ```
 
 ## 配置文件
@@ -38,7 +38,7 @@ config/feedback-routing.json 四类反馈标签和品类负责人配置
 | 文件                           | 内容                                                                                                                          | 是否提交                                     |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
 | `.env`                         | 非敏感设置，包括 `SENTRY_PROJECT`、Teambition 目标项目与任务字段 ID                                                           | 否；由 `.env.example` 复制                   |
-| `config/feedback-routing.json` | 四类反馈标签 ID、负责人及其 `taskTypes`；不包含密钥                                                                           | 是                                           |
+| `config/feedback-routing.json` | 分类与环境标签 ID、负责人及其 `taskTypes`、兜底负责人；不包含密钥                                                             | 是                                           |
 | `config/credentials.env`       | `TEAMBITION_APP_ID` 和 `TEAMBITION_APP_SECRET`，真实模式下由 Compose 注入为容器环境变量，用于在线获取 appToken 或本地签发 JWT | 否；由 `config/credentials.env.example` 复制 |
 | `secrets/*`                    | 数据库密码与连接串、Sentry Webhook Secret、Sentry API Token                                                                   | 否；由 Compose secrets 挂载                  |
 
@@ -46,28 +46,38 @@ config/feedback-routing.json 四类反馈标签和品类负责人配置
 
 `config/credentials.env` 的值是 Teambition 企业内部应用的 Client ID 和 Client Secret。请只在本机私有文件中填写实际值，不要放到 `.env.example`、命令行参数或提交记录中。Compose 的环境变量可被拥有 Docker 管理权限的人查看，应限制部署主机和此文件的访问权限。程序同时支持 `TEAMBITION_APP_SECRET_FILE`，但本部署方式使用直接的 `TEAMBITION_APP_SECRET` 环境变量；两者不能同时设置。
 
-`config/feedback-routing.json` 是分类标签与负责人映射的唯一来源。`feedbackTags` 必须包含四个分类及其标签 ID；`categoryOwners` 配置 `data_issue`、`suggestion` 各自的单个固定负责人 ID，缺省时保持未指派且不会回退到品类负责人；`owners` 中每组配置平台异常的姓名、一个 `executorId` 和负责的 `taskTypes`。当前包含四位平台负责人、42 个任务类型；`PD_label`、`Tagging`、`TSR_AS` 的平台异常尚未指定负责人。任务类型忽略大小写并去除首尾空格，同一类型重复配置会阻止启动。固定类别只允许数据问题、需求建议，不允许覆盖平台异常或为其他类别设置负责人。ID 必须是 24 位十六进制值；此校验不代表已验证私有项目权限。
+`config/feedback-routing.json` 是标签与负责人映射的唯一来源，各字段含义如下：
+
+- `feedbackTags` 必须包含四个反馈分类及其标签 ID。
+- `owners` 配置平台异常的姓名、单个 `executorId` 和 `taskTypes`，保留原有四位负责人、42 个任务类型。必填的 `defaultPlatformExecutorId` 配置张优为（`6784ad2f4981b4ff9f939fe3`）；任务类型缺失或未命中时使用此人，包括 `PD_label`、`Tagging`、`TSR_AS` 等未配置类型。
+- `suggestionOwners` 是需求建议独立的任务类型映射：张莹莹（`688b39a65ece6d764f3cac6d`）负责 `Lidar_seg`、`Lidar_seg_4D`、`Driving_Lidar_seg`、`TLR_4D`；武欣媛（`6a277b7030ff5045c8d8bfd8`）负责其余已列出的 38 种任务类型。这里的 `TLR_4D` 调整只影响需求建议，平台异常仍指派王建。
+- `categoryOwners` 只允许 `data_issue`、`suggestion` 的单个固定负责人。数据问题直接使用其固定负责人；需求建议缺少或未命中任务类型时，使用此处配置的武欣媛。省略某类别的固定负责人时，该类别在没有任务类型匹配的情况下保持未指派并记录待分流原因。
+- `environmentTags` 将业务页面 URL 查询串中的 `server` 代码映射到云标签 ID，只支持 `TC`、`HS` 两个键。`TC` 对应腾讯云（`6afaaa6ba182b75dece7c837`），`HS` 对应火山云（`6afaaa7a77889592b04252ab`）；`server` 缺失或未知时只保留分类标签。
+
+任务类型、`server` 代码均忽略大小写并去除首尾空格。同一类别内任务类型重复配置、云代码键归一后重复、不支持的云代码、无效 ID 或未知配置字段都会阻止启动；平台异常与需求建议可以为同一任务类型配置不同负责人。用户和标签 ID 必须是 24 位十六进制值；此校验不代表已验证私有项目权限。升级旧配置时需补充 `defaultPlatformExecutorId`。
 
 程序默认从 `config/feedback-routing.json` 读取，可用 `FEEDBACK_ROUTING_FILE` 指定其他路径。Compose 将仓库内配置只读挂载到 `/etc/sentry-adapter/feedback-routing.json`，并覆盖容器内路径；缺文件或内容无效时启动失败。修改文件后重启 adapter 生效，不需要重新编译程序；部署主机须保留该文件并允许容器用户读取。更新配置只影响尚未处理的作业，不会自动改派已有卡片。
 
-建卡沿用已确认的共用 `scenariofieldconfigId`，`involveMembers` 使用操作人 ID，下拉 `customfields` 继续表示“标注平台”。四个分类标签通过独立 `tagIds` 写入，不能替换成自定义字段选项 ID。负责人只来自路由配置，旧 `TEAMBITION_EXECUTOR_ID` 不再作为全局兜底。第一版无需配置截图文件字段。
+建卡沿用已确认的共用 `scenariofieldconfigId`，`involveMembers` 使用操作人 ID，下拉 `customfields` 继续表示“标注平台”。分类标签及匹配的环境标签通过独立 `tagIds` 一次写入，不能替换成自定义字段选项 ID。负责人只来自路由配置，旧 `TEAMBITION_EXECUTOR_ID` 不再作为全局兜底。第一版无需配置截图文件字段。
 
 | Teambition 建卡字段                  | 来源                                                                                                                 |
 | ------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
-| `content`                            | `【{taskType}: {dataset_id}】 {清洗后问题描述摘要}`                                                                  |
+| `content`                            | `【{taskType}: {dataset_id}】{反馈分类}：{清洗后问题描述摘要}`，例如 `【TLR_4D: dataset-1】需求建议：增加批量操作`       |
 | `note`                               | 反馈原文、空行、Sentry 反馈链接；有用户名时最后一行追加 `用户名：<用户名>`；不搬运截图附件                           |
 | `projectId`、`scenariofieldconfigId` | `TEAMBITION_PROJECT_ID`、共用的 `TEAMBITION_SCENARIO_ID`                                                             |
 | `involveMembers`                     | `[TEAMBITION_OPERATOR_ID]`                                                                                           |
 | `objectType`                         | 固定为 `task`                                                                                                        |
 | `customfields`                       | 配置的下拉字段与选项；第一版不加入截图文件字段                                                                       |
-| `tagIds`                             | `feedback-routing.json` 中该反馈分类对应的一个标签 ID                                                                |
-| `executorId`                         | 平台异常使用 `owners` 中匹配的单个用户 ID；数据问题、需求建议使用 `categoryOwners` 中固定的单个用户 ID；其他情况省略 |
+| `tagIds`                             | 反馈分类标签 ID，加上业务页面 URL 的 `server` 在 `environmentTags` 中匹配的云标签 ID；不重复添加相同 ID             |
+| `executorId`                         | 平台异常用 `owners` 或平台兜底；需求建议用 `suggestionOwners` 或固定负责人；数据问题用固定负责人；其他类别省略      |
 
 反馈深链接使用 Sentry Issue API 返回的项目 slug、项目数值 ID 和 Issue ID，构成 `.../organizations/{org}/issues/feedback/?feedbackSlug={projectSlug}:{issueId}&project={projectId}`。缺少这些字段时回退到 API permalink 或普通 Issue 地址。
 
 备注中的用户名使用 Sentry 反馈的 Issue API `metadata.name`，缺失时回退到 Event `contexts.feedback.name`；两处都没有时省略用户名行。`event.user.username` 不作为反馈用户名。
 
-缺少任务元信息时使用标题兜底；无法匹配负责人时记录分流提示并保持未指派。缺少反馈正文或最终生成的反馈链接时进入 `needs_review`，不会向 Teambition 发送建卡请求。创建结果不明确时仍进入 `uncertain`，不能通过重新建卡补标签或负责人。
+云环境来自反馈业务页面 URL：优先使用非空 `contexts.feedback.url`，仅在该字段缺失或空白时回退到 Event 的 `url` tag。只读取该 URL 查询串中唯一的 `server` 参数，去除首尾空格并转成大写后匹配 `TC`／`HS`。URL 无有效查询串、`server` 缺失、未知或重复时只写分类标签；不从正文、嵌套 URL 或 fragment 读取 `server`。Sentry 的 `environment` 只区分线上、测试、预发等部署环境，不作为云标签来源。
+
+缺少任务元信息时使用标题兜底，并按上述规则使用兜底负责人；需使用固定负责人而该配置缺失时，记录分流提示并保持未指派。缺少反馈正文或最终生成的反馈链接时进入 `needs_review`，不会向 Teambition 发送建卡请求。创建结果不明确时仍进入 `uncertain`，不能通过重新建卡补标签或负责人。
 
 ## 使用 Make 构建与验证
 

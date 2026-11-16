@@ -81,13 +81,13 @@ func (w *Worker) process(ctx context.Context, j store.Job) {
 		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback message is missing"))
 		return
 	}
-	decision := w.Routing.Resolve(f.Kind, f.TaskType)
+	decision := w.Routing.Resolve(f.Kind, f.TaskType, f.CloudServer)
 	if decision.TagID == "" {
 		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback routing configuration is unavailable"))
 		return
 	}
-	// Missing task metadata must not hide a feedback report. Fixed category owners
-	// still apply; only platform assignment needs a matching task type.
+	// Missing task metadata must not hide a feedback report. Platform feedback
+	// and suggestions use their configured fallback owners when no type matches.
 	if decision.ReviewReason != "" {
 		log.Warn("feedback requires manual triage", "reason", decision.ReviewReason)
 	}

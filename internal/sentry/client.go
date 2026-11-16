@@ -43,6 +43,7 @@ type Feedback struct {
 	Kind              string
 	TaskType          string
 	DatasetID         string
+	CloudServer       string
 	IssueURL          string
 	Attachments       []Attachment
 }
@@ -115,6 +116,7 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 		Name         string `json:"name"`
 		FeedbackType string `json:"feedback_type"`
 		Type         string `json:"type"`
+		URL          string `json:"url"`
 	}
 	if raw, ok := event.Contexts["feedback"]; ok {
 		_ = json.Unmarshal(raw, &details)
@@ -136,6 +138,7 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 	kind := ""
 	taskType := ""
 	datasetID := ""
+	sourceURL := strings.TrimSpace(details.URL)
 	for _, tag := range event.Tags {
 		value := strings.TrimSpace(tag.Value)
 		switch tag.Key {
@@ -150,6 +153,10 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 		case "dataset_id":
 			if datasetID == "" {
 				datasetID = value
+			}
+		case "url":
+			if sourceURL == "" {
+				sourceURL = value
 			}
 		}
 	}
@@ -183,13 +190,27 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 		IsFeedback: true,
 		IssueID:    issueID, EventID: eventID, Project: issue.Project.Slug,
 		Title: issue.Title, Message: details.Message, Username: username, Kind: kind,
-		TaskType: taskType, DatasetID: datasetID,
+		TaskType: taskType, DatasetID: datasetID, CloudServer: cloudServerFromURL(sourceURL),
 		IssueURL: c.feedbackURL(org, issueID, issue.Project.Slug, issue.Project.ID, issue.Permalink),
 	}
 	if eventID == "" || eventID == "oldest" {
 		return Feedback{}, errors.New("Sentry event has no ID")
 	}
 	return f, nil
+}
+
+// Cloud routing follows the business page URL's server query parameter. Sentry's
+// environment describes a deployment stage and does not identify a cloud.
+func cloudServerFromURL(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return ""
+	}
+	query, err := url.ParseQuery(u.RawQuery)
+	if err != nil || len(query["server"]) != 1 {
+		return ""
+	}
+	return strings.ToUpper(strings.TrimSpace(query["server"][0]))
 }
 
 func (c *Client) feedbackURL(org, issueID, projectSlug, projectID, permalink string) string {

@@ -40,22 +40,43 @@ func TestFeedbackSummaryCleansOnlyDescription(t *testing.T) {
 
 func TestTitlePreservesProblemAndRuneLimits(t *testing.T) {
 	message := strings.Repeat("保存失败🚗", 30)
-	got := title(strings.Repeat("任务", 60), "dataset-123", message)
+	got := title("suggestion", strings.Repeat("任务", 60), "dataset-123", message)
 	if !utf8.ValidString(got) || len([]rune(got)) != maxTitleRunes {
 		t.Errorf("title must contain %d valid Unicode runes: %q", maxTitleRunes, got)
 	}
-	wantSuffix := "】 " + truncateRunes(message, maxSummaryRunes)
+	wantSuffix := "】需求建议：" + truncateRunes(message, maxSummaryRunes)
 	if !strings.HasSuffix(got, wantSuffix) {
 		t.Errorf("long metadata hid the problem summary: %q", got)
 	}
 }
 
 func TestTitleUsesFallbackMetadataAndNormalizesWhitespace(t *testing.T) {
-	if got := title("", "", "![截图](/image.png)"); got != "【未知任务类型: 未知数据集】 问题详情见反馈" {
+	if got := title("other", "", "", "![截图](/image.png)"); got != "【未知任务类型: 未知数据集】其他：问题详情见反馈" {
 		t.Errorf("missing metadata title = %q", got)
 	}
-	if got := title(" OD_4D\n", " dataset-1\t", "保存\n失败"); got != "【OD_4D: dataset-1】 保存 失败" {
+	if got := title("platform_bug", " OD_4D\n", " dataset-1\t", "保存\n失败"); got != "【OD_4D: dataset-1】平台异常：保存 失败" {
 		t.Errorf("whitespace title = %q", got)
+	}
+}
+
+func TestTitleIncludesFeedbackCategory(t *testing.T) {
+	for _, tc := range []struct {
+		kind, label string
+	}{
+		{"platform_bug", "平台异常"},
+		{"data_issue", "数据问题"},
+		{"suggestion", "需求建议"},
+		{"other", "其他"},
+		{"unknown", "其他"},
+		{"feature_gap", "其他"},
+		{"", "其他"},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			want := "【OD: dataset-1】" + tc.label + "：保存失败"
+			if got := title(tc.kind, "OD", "dataset-1", "保存失败"); got != want {
+				t.Errorf("title() = %q, want %q", got, want)
+			}
+		})
 	}
 }
 
