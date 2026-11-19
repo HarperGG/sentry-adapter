@@ -61,7 +61,10 @@ CREATE TABLE IF NOT EXISTS feedback_jobs (
 	_, err = s.pool.Exec(ctx, `CREATE INDEX IF NOT EXISTS feedback_jobs_ready_idx
   ON feedback_jobs (next_attempt_at, id)
 	WHERE status IN ('pending', 'retry')`)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.migrateRCA(ctx)
 }
 
 // Enqueue commits the job before the webhook handler acknowledges delivery.

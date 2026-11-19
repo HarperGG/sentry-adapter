@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -15,6 +16,13 @@ type Config struct {
 	SentryToken                    string
 	SentryOrg                      string
 	SentryProject                  string
+	RCAEnabled                     bool
+	RCAAllowedProjects             []string
+	AgentOSBaseURL                 string
+	AgentOSAppID                   string
+	AgentOSUserID                  string
+	AgentOSBearerToken             string
+	DingTalkWebhookURL             string
 	SentryAttachmentRedirectHosts  []string
 	FeedbackRoutingFile            string
 	TeambitionMode                 string
@@ -54,6 +62,9 @@ func Load() (Config, error) {
 		SentryBaseURL:                  fallback(os.Getenv("SENTRY_BASE_URL"), "https://sentry.gwm-adas.com"),
 		SentryOrg:                      fallback(os.Getenv("SENTRY_ORG"), "sentry"),
 		SentryProject:                  fallback(os.Getenv("SENTRY_PROJECT"), "anno-seg-test"),
+		AgentOSBaseURL:                 fallback(os.Getenv("AGENTOS_BASE_URL"), "https://prod-gateway-cloud.gwm-adas.com/armory-core/api/v1"),
+		AgentOSAppID:                   fallback(os.Getenv("AGENTOS_APP_ID"), "200004"),
+		AgentOSUserID:                  fallback(os.Getenv("AGENTOS_USER_ID"), "sentry-adapter"),
 		SentryAttachmentRedirectHosts:  splitHosts(os.Getenv("SENTRY_ATTACHMENT_REDIRECT_HOSTS")),
 		FeedbackRoutingFile:            fallback(os.Getenv("FEEDBACK_ROUTING_FILE"), "config/feedback-routing.json"),
 		TeambitionMode:                 fallback(os.Getenv("TEAMBITION_MODE"), "mock"),
@@ -84,6 +95,24 @@ func Load() (Config, error) {
 		c.TeambitionFeatureTypeID = c.TeambitionScenarioID
 	}
 	var err error
+	c.RCAEnabled, err = strconv.ParseBool(fallback(os.Getenv("RCA_ENABLED"), "false"))
+	if err != nil {
+		return c, errors.New("RCA_ENABLED must be a boolean")
+	}
+	if c.RCAEnabled {
+		if c.RCAAllowedProjects, err = parseRCAProjects(os.Getenv("RCA_ALLOWED_PROJECTS")); err != nil {
+			return c, err
+		}
+		if c.AgentOSBearerToken, err = secret("AGENTOS_BEARER_TOKEN"); err != nil {
+			return c, err
+		}
+		if c.DingTalkWebhookURL, err = secret("DINGTALK_WEBHOOK_URL"); err != nil {
+			return c, err
+		}
+		if c.DingTalkWebhookURL == "" {
+			return c, errors.New("DINGTALK_WEBHOOK_URL is required when RCA_ENABLED is true")
+		}
+	}
 	if c.DatabaseURL, err = secret("DATABASE_URL"); err != nil {
 		return c, err
 	}
@@ -133,6 +162,23 @@ func fallback(value, defaultValue string) string {
 		return defaultValue
 	}
 	return value
+}
+
+// An empty slice represents the explicit all-projects setting.
+func parseRCAProjects(value string) ([]string, error) {
+	value = strings.TrimSpace(value)
+	if value == "*" {
+		return nil, nil
+	}
+	projects := strings.Split(fallback(value, "anno-seg-test"), ",")
+	for i, project := range projects {
+		project = strings.TrimSpace(project)
+		if project == "" || strings.Contains(project, "*") {
+			return nil, errors.New("RCA_ALLOWED_PROJECTS must contain comma-separated project slugs or a single *")
+		}
+		projects[i] = project
+	}
+	return projects, nil
 }
 
 func splitHosts(value string) []string {

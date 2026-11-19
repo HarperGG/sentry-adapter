@@ -9,10 +9,13 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
+	"sentry-adapter/internal/agentos"
 	"sentry-adapter/internal/config"
+	"sentry-adapter/internal/dingtalk"
 	"sentry-adapter/internal/routing"
 	"sentry-adapter/internal/sentry"
 	"sentry-adapter/internal/store"
@@ -81,11 +84,31 @@ func run(logger *slog.Logger) error {
 		}
 		logger.Info("Teambition client ready", "mode", "real", "auth_mode", cfg.TeambitionAuthMode)
 	}
-	w := &worker.Worker{Store: db, Sentry: sentryClient, Teambition: creator,
-		Routing:      rules,
-		Organization: cfg.SentryOrg, Project: cfg.SentryProject,
-		MockMode: cfg.TeambitionMode == "mock", Logger: logger}
-	go w.Run(ctx)
+	w := &worker.Worker{
+		Store: db, Sentry: sentryClient, Teambition: creator, Routing: rules,
+		Organization: cfg.SentryOrg, Project: cfg.SentryProject, MockMode: cfg.TeambitionMode == "mock",
+		RCAEnabled: cfg.RCAEnabled, RCAAllowedProjects: cfg.RCAAllowedProjects,
+		Logger: logger,
+	}
+	var workers sync.WaitGroup
+	defer func() {
+		stop()
+		workers.Wait()
+	}()
+	if cfg.RCAEnabled {
+		agent, err := agentos.New(cfg.AgentOSBaseURL, cfg.AgentOSAppID, cfg.AgentOSUserID, cfg.AgentOSBearerToken)
+		if err != nil {
+			return err
+		}
+		robot, err := dingtalk.New(cfg.DingTalkWebhookURL, cfg.SentryBaseURL)
+		if err != nil {
+			return err
+		}
+		rca := worker.RCAWorker{Store: db, Agent: agent, Robot: robot, AllowedProjects: cfg.RCAAllowedProjects, Logger: logger}
+		workers.Go(func() { rca.Run(ctx) })
+		logger.Info("platform feedback analysis enabled", "organization", cfg.SentryOrg, "app_id", cfg.AgentOSAppID, "allowed_projects", cfg.RCAAllowedProjects)
+	}
+	workers.Go(func() { w.Run(ctx) })
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", func(out http.ResponseWriter, _ *http.Request) {
 		out.Header().Set("Content-Type", "application/json")
@@ -101,7 +124,28 @@ func run(logger *slog.Logger) error {
 		out.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(out, `{"status":"ready"}`)
 	})
-	mux.HandleFunc("POST /webhooks/sentry/user-feedback", func(out http.ResponseWriter, req *http.Request) {
+	mux.HandleFunc("POST /webhooks/sentry/user-feedback", feedbackHandler(cfg, db, logger))
+	server := &http.Server{Addr: cfg.ListenAddr, Handler: mux,
+		ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second,
+		WriteTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
+		MaxHeaderBytes: 16 << 10}
+	errCh := make(chan error, 1)
+	go func() { errCh <- server.ListenAndServe() }()
+	logger.Info("adapter listening", "addr", cfg.ListenAddr, "project", cfg.SentryProject)
+	select {
+	case <-ctx.Done():
+	case err := <-errCh:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return server.Shutdown(shutdownCtx)
+}
+
+func feedbackHandler(cfg config.Config, db *store.Store, logger *slog.Logger) http.HandlerFunc {
+	return func(out http.ResponseWriter, req *http.Request) {
 		if !strings.HasPrefix(req.Header.Get("Content-Type"), "application/json") {
 			http.Error(out, "Content-Type must be application/json", http.StatusUnsupportedMediaType)
 			return
@@ -125,17 +169,13 @@ func run(logger *slog.Logger) error {
 			out.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if delivery.Organization != "" && delivery.Organization != cfg.SentryOrg && !allDigits(delivery.Organization) {
+		if !webhook.MayMatchSlug(delivery.Organization, cfg.SentryOrg) {
 			out.WriteHeader(http.StatusNoContent)
 			return
 		}
-		if delivery.Project != "" && delivery.Project != cfg.SentryProject {
-			// Sentry may send a numeric project ID. The worker checks the slug
-			// from the authenticated Issue API, so do not filter on that here.
-			if !allDigits(delivery.Project) {
-				out.WriteHeader(http.StatusNoContent)
-				return
-			}
+		if !cfg.RCAEnabled && !webhook.MayMatchSlug(delivery.Project, cfg.SentryProject) {
+			out.WriteHeader(http.StatusNoContent)
+			return
 		}
 		deadline, cancel := context.WithTimeout(req.Context(), 750*time.Millisecond)
 		defer cancel()
@@ -151,34 +191,5 @@ func run(logger *slog.Logger) error {
 		out.Header().Set("Content-Type", "application/json")
 		out.WriteHeader(http.StatusAccepted)
 		_, _ = io.WriteString(out, `{"accepted":true}`)
-	})
-	server := &http.Server{Addr: cfg.ListenAddr, Handler: mux,
-		ReadHeaderTimeout: 3 * time.Second, ReadTimeout: 5 * time.Second,
-		WriteTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second,
-		MaxHeaderBytes: 16 << 10}
-	errCh := make(chan error, 1)
-	go func() { errCh <- server.ListenAndServe() }()
-	logger.Info("adapter listening", "addr", cfg.ListenAddr, "project", cfg.SentryProject)
-	select {
-	case <-ctx.Done():
-	case err := <-errCh:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return err
-		}
 	}
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	return server.Shutdown(shutdownCtx)
-}
-
-func allDigits(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return false
-		}
-	}
-	return true
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -11,17 +12,20 @@ import (
 	"sentry-adapter/internal/sentry"
 	"sentry-adapter/internal/store"
 	"sentry-adapter/internal/teambition"
+	"sentry-adapter/internal/webhook"
 )
 
 type Worker struct {
-	Store        *store.Store
-	Sentry       *sentry.Client
-	Teambition   teambition.Creator
-	Routing      *routing.Rules
-	Organization string
-	Project      string
-	MockMode     bool
-	Logger       *slog.Logger
+	Store              *store.Store
+	Sentry             *sentry.Client
+	Teambition         teambition.Creator
+	Routing            *routing.Rules
+	Organization       string
+	Project            string
+	MockMode           bool
+	RCAEnabled         bool
+	RCAAllowedProjects []string
+	Logger             *slog.Logger
 }
 
 func (w *Worker) Run(ctx context.Context) {
@@ -69,8 +73,27 @@ func (w *Worker) process(ctx context.Context, j store.Job) {
 		}
 		return
 	}
-	if !f.IsFeedback || f.Project != w.Project {
-		w.finish(ctx, log, w.Store.MarkIgnored(ctx, j.ID, "not a feedback issue in allowed project"))
+	if !f.IsFeedback {
+		w.finish(ctx, log, w.Store.MarkIgnored(ctx, j.ID, "not a feedback issue"))
+		return
+	}
+	decision := w.Routing.Resolve(f.Kind, f.TaskType, f.CloudServer)
+	// Use the project from the authenticated Issue API for the RCA rollout.
+	// Teambition checks its own project below.
+	if w.RCAEnabled && decision.FeedbackType == "platform_bug" &&
+		(len(w.RCAAllowedProjects) == 0 || slices.Contains(w.RCAAllowedProjects, f.Project)) {
+		err := w.Store.EnqueueRCA(ctx, store.RCAJob{
+			Organization: w.Organization, Project: f.Project, IssueID: f.IssueID,
+			EventID: f.EventID, IssueURL: f.IssueURL,
+		})
+		if err != nil {
+			log.Error("enqueue feedback analysis", "error", err)
+			w.finish(ctx, log, w.Store.MarkRetry(ctx, j.ID, "could not enqueue feedback analysis", j.Attempts))
+			return
+		}
+	}
+	if f.Project != w.Project || !webhook.MayMatchSlug(j.Project, w.Project) {
+		w.finish(ctx, log, w.Store.MarkIgnored(ctx, j.ID, "outside Teambition project scope"))
 		return
 	}
 	if strings.TrimSpace(f.IssueURL) == "" {
@@ -81,7 +104,6 @@ func (w *Worker) process(ctx context.Context, j store.Job) {
 		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback message is missing"))
 		return
 	}
-	decision := w.Routing.Resolve(f.Kind, f.TaskType, f.CloudServer)
 	if decision.TagID == "" {
 		w.finish(ctx, log, w.Store.MarkReview(ctx, j.ID, "processing", "feedback routing configuration is unavailable"))
 		return

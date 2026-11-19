@@ -34,6 +34,20 @@ type Delivery struct {
 	DedupKey     string
 }
 
+// MayMatchSlug treats numeric or missing webhook references as unresolved.
+// The caller verifies the actual resource against Sentry before acting on it.
+func MayMatchSlug(ref, slug string) bool {
+	if ref == "" || ref == slug {
+		return true
+	}
+	for _, r := range ref {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 // Parse verifies the HMAC-SHA256 signature over the raw request body before
 // parsing it. accepted=false means the signed webhook is unrelated to feedback.
 // The caller must independently limit the HTTP request body before reading it.

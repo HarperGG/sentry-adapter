@@ -1,6 +1,64 @@
 package config
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"slices"
+	"testing"
+)
+
+func TestRCAConfiguration(t *testing.T) {
+	for name, value := range map[string]string{
+		"TEAMBITION_MODE": "mock", "DATABASE_URL": "postgres://example.invalid/adapter",
+		"SENTRY_WEBHOOK_SECRET": "test-secret", "SENTRY_AUTH_TOKEN": "test-token",
+		"DATABASE_URL_FILE": "", "SENTRY_WEBHOOK_SECRET_FILE": "", "SENTRY_AUTH_TOKEN_FILE": "",
+		"RCA_ENABLED": "", "RCA_ALLOWED_PROJECTS": "", "AGENTOS_APP_ID": "", "AGENTOS_USER_ID": "", "AGENTOS_BASE_URL": "",
+		"AGENTOS_BEARER_TOKEN": "", "AGENTOS_BEARER_TOKEN_FILE": "",
+		"DINGTALK_WEBHOOK_URL": "", "DINGTALK_WEBHOOK_URL_FILE": "",
+	} {
+		t.Setenv(name, value)
+	}
+	if cfg, err := Load(); err != nil || cfg.RCAEnabled {
+		t.Fatalf("expected legacy configuration to run with RCA disabled, err=%v", err)
+	}
+	t.Setenv("RCA_ENABLED", "enabled")
+	if _, err := Load(); err == nil {
+		t.Fatal("accepted an invalid RCA switch")
+	}
+	t.Setenv("RCA_ENABLED", "true")
+	if _, err := Load(); err == nil {
+		t.Fatal("accepted enabled RCA without a webhook")
+	}
+	path := filepath.Join(t.TempDir(), "robot")
+	const robot = "https://example.invalid/robot"
+	if err := os.WriteFile(path, []byte(robot+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DINGTALK_WEBHOOK_URL_FILE", path)
+	cfg, err := Load()
+	if err != nil || !cfg.RCAEnabled || cfg.DingTalkWebhookURL != robot || cfg.AgentOSAppID != "200004" || cfg.AgentOSUserID != "sentry-adapter" {
+		t.Fatalf("could not enable RCA independently of Teambition in mock mode, err=%v", err)
+	}
+	if !slices.Equal(cfg.RCAAllowedProjects, []string{"anno-seg-test"}) {
+		t.Fatalf("default RCA rollout = %v, want only anno-seg-test", cfg.RCAAllowedProjects)
+	}
+	t.Setenv("RCA_ALLOWED_PROJECTS", "anno-seg-test, anno-dev")
+	cfg, err = Load()
+	if err != nil || !slices.Equal(cfg.RCAAllowedProjects, []string{"anno-seg-test", "anno-dev"}) {
+		t.Fatalf("explicit project rollout = %v, err=%v", cfg.RCAAllowedProjects, err)
+	}
+	t.Setenv("RCA_ALLOWED_PROJECTS", "*")
+	cfg, err = Load()
+	if err != nil || len(cfg.RCAAllowedProjects) != 0 {
+		t.Fatalf("explicit all-project rollout = %v, err=%v", cfg.RCAAllowedProjects, err)
+	}
+	for _, invalid := range []string{"anno-seg-test,*", ",", "anno-*"} {
+		t.Setenv("RCA_ALLOWED_PROJECTS", invalid)
+		if _, err := Load(); err == nil {
+			t.Errorf("accepted invalid rollout %q", invalid)
+		}
+	}
+}
 
 func TestLoadUsesEnvironmentForSentryProjectAndTeambitionCredentials(t *testing.T) {
 	for name, value := range map[string]string{

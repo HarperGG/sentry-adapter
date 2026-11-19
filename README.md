@@ -1,6 +1,41 @@
-# Sentry 用户反馈 → Teambition 适配器
+# Sentry 用户反馈适配器
 
-这是一个 Go 服务，用于接收 Sentry Internal Integration 的 `issue.created` Webhook，并把指定 Sentry 项目的用户反馈转成 Teambition 任务。目标项目由 `.env` 中的 `SENTRY_PROJECT` 指定，示例值为 `anno-seg-test`。架构与当前限制见 [docs/architecture.md](docs/architecture.md)。
+这是一个 Go 服务，接收 Sentry 用户反馈 webhook。指定项目的反馈按原有规则创建 Teambition 任务。开启 AgentOS 分析后，适配器按 Issue ID 分析已启用项目的“平台问题”，并将结果发到钉钉群。[架构与实现](docs/architecture.md)
+
+## 平台问题分析与群通知
+
+| Sentry 已核实的反馈 | AgentOS 分析与钉钉通知 | Teambition 建卡 |
+| --- | --- | --- |
+| 平台问题 `platform_bug` | 仅分析 `RCA_ALLOWED_PROJECTS` 启用的项目，有证据的结论发到群里 | 仅 `SENTRY_PROJECT` |
+| 需求建议、数据问题、其他 | 本阶段跳过 | 仅 `SENTRY_PROJECT`，沿用原分类与指派规则 |
+
+本部署按 Sentry 项目区分环境。`anno-seg-test` 是测试项目，`anno-dev` 是线上项目。适配器以 Sentry Issue API 返回的项目 slug 精确匹配分析清单。已启用项目的腾讯云、火山云和未标明云环境的反馈均可分析。每个来源项目需要投递 webhook，并允许适配器与 AgentOS 的 Sentry MCP 读取 Issue 与 Event。
+
+首期仅启用测试项目，在部署目录的私有 `.env.rca` 中使用以下配置。Compose 在真实及模拟建卡模式下都会加载这个文件，需使用 Compose 2.24 或更高版本。[Compose 可选环境文件](https://docs.docker.com/reference/compose-file/services/#required)
+
+```dotenv
+RCA_ENABLED=true
+RCA_ALLOWED_PROJECTS=anno-seg-test
+DINGTALK_WEBHOOK_URL=<群机器人的完整 HTTPS webhook>
+```
+
+总开关 `RCA_ENABLED` 默认为 `false`。开启后，未填写项目清单时默认只处理 `anno-seg-test`。上线时将清单改为 `anno-seg-test,anno-dev` 并重新创建适配器容器。如果需要放开当前组织内所有已接入项目，可显式设为 `*`。
+
+清单同时控制分析和发群。移出清单的项目会暂停领取已排队的分析和待发送报告，重新加入后从原阶段继续。关闭期间新收到的该项目反馈跳过分析，开启后不会自动补跑。
+
+应用默认使用 `AGENTOS_APP_ID=200004`、`AGENTOS_USER_ID=sentry-adapter`，网关为 `https://prod-gateway-cloud.gwm-adas.com/armory-core/api/v1`。可用 `AGENTOS_BASE_URL` 覆盖网关地址。如果接入网关启用了 Bearer 鉴权，配置 `AGENTOS_BEARER_TOKEN`。机器人地址与 Bearer token 也支持通过对应的 `_FILE` 变量指定容器内的凭据文件。修改配置后重新创建适配器容器。
+
+适配器调用 `create_session` 为每次分析建立独立会话，再通过 `chat_stream` 提交 Issue ID、反馈链接和 Event ID。AgentOS 应用通过 Sentry MCP 读取上下文，输出结构化 JSON，包括问题描述、根因分类、初步结论、证据、置信度和核实建议。反馈人选的“平台问题”决定是否启动分析，根因分类由证据决定，因此平台反馈也可能归因为数据或网络问题。[Sentry Issue API](https://docs.sentry.io/api/events/retrieve-an-issue/) · [Issue Event API](https://docs.sentry.io/api/events/retrieve-an-issue-event/)
+
+完整 JSON 保存在 `rca_jobs.report`。群消息展示问题、初步原因、分类、置信度、建议和 Sentry 链接，关闭人员提醒。报告缺少证据或分析失败时进入 `needs_review`。同一 Issue 的重复 webhook 复用已有作业。机器人明确限流时，仅重试发送已保存的报告。发送超时或回执不明确时进入 `uncertain`，可按 Issue ID 到群中核对。
+
+按 Issue ID 查看两个分支的状态（示例中的数字替换为实际 ID）：
+
+```sql
+SELECT issue_id, project, status, task_id FROM feedback_jobs WHERE issue_id = '12345';
+SELECT issue_id, project, status, analysis_attempts, delivery_attempts, last_error, report
+FROM rca_jobs WHERE issue_id = '12345';
+```
 
 ## 当前实现范围
 
@@ -38,6 +73,7 @@ config/feedback-routing.json 分类与环境标签、品类负责人和兜底负
 | 文件                           | 内容                                                                                                                          | 是否提交                                     |
 | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
 | `.env`                         | 非敏感设置，包括 `SENTRY_PROJECT`、Teambition 目标项目与任务字段 ID                                                           | 否；由 `.env.example` 复制                   |
+| `.env.rca`                     | 可选的分析开关、AgentOS 连接信息和钉钉机器人地址 | 否 |
 | `config/feedback-routing.json` | 分类与环境标签 ID、负责人及其 `taskTypes`、兜底负责人；不包含密钥                                                             | 是                                           |
 | `config/credentials.env`       | `TEAMBITION_APP_ID` 和 `TEAMBITION_APP_SECRET`，真实模式下由 Compose 注入为容器环境变量，用于在线获取 appToken 或本地签发 JWT | 否；由 `config/credentials.env.example` 复制 |
 | `secrets/*`                    | 数据库密码与连接串、Sentry Webhook Secret、Sentry API Token                                                                   | 否；由 Compose secrets 挂载                  |

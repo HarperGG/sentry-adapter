@@ -23,7 +23,10 @@ services:
         GOPROXY: ${GOPROXY:-https://goproxy.cn}
     image: ${IMAGE:-sentry-adapter:local}
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - ./.env
+      - path: ./.env.rca
+        required: false
     environment:
       LISTEN_ADDR: :8787
       TEAMBITION_MODE: mock

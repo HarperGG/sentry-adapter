@@ -1,17 +1,17 @@
-# Sentry User Feedback → Teambition Adapter：架构与实现状态
+# Sentry 用户反馈适配器架构与实现状态
 
-> 本文按当前仓库的第一版代码描述实现。Sentry 26.6 与 Teambition 私有实例的真实端到端联调尚未完成；“待验证”和“后续设计”均不表示已上线。
+> 本文描述当前仓库的建卡和分析流程。Sentry 26.6 与 Teambition 私有实例的真实端到端联调尚未完成；“待验证”和“后续设计”均不表示已上线。
 
 ## 1. 目标与边界
 
-服务接收自建 Sentry 的 Issue webhook，从指定组织和项目读取 User Feedback 的 Issue、Event，在固定的 Teambition 项目创建反馈任务，按配置写入分类标签和匹配的云环境标签；平台异常与需求建议分别按任务类型匹配一名负责人，未命中时使用各自的兜底负责人，数据问题使用固定负责人，其他类别不指派。第一版不查询、下载或上传截图；任务备注保留反馈原文、Sentry 链接及可选用户名。目标 Sentry 项目由 `SENTRY_PROJECT` 配置。业务键仍是 Sentry Issue ID：同一 Issue 的重复投递只产生一个作业，本次改造不迁移数据库或自动重放历史作业。
+服务接收自建 Sentry 的 Issue webhook，为建卡从指定组织和项目读取 User Feedback 的 Issue、Event，在固定的 Teambition 项目创建反馈任务，按配置写入分类标签和匹配的云环境标签；平台异常与需求建议分别按任务类型匹配一名负责人，未命中时使用各自的兜底负责人，数据问题使用固定负责人，其他类别不指派。第一版不查询、下载或上传截图；任务备注保留反馈原文、Sentry 链接及可选用户名。建卡目标 Sentry 项目由 `SENTRY_PROJECT` 配置。启用 `RCA_ENABLED` 后，适配器先为同一组织中 `RCA_ALLOWED_PROJECTS` 已启用项目的 `platform_bug` 反馈创建分析作业，再判断是否建卡。新作业按 Issue 去重，历史反馈不会自动回放。
 
 已知 Sentry Internal Integration 配置了 https://sentry-adapter.gwm-adas.com/webhooks/sentry/user-feedback，订阅 Issue webhook；实际 FEEDBACK 类 issue.created 是否投递仍要在目标 Sentry 26.6 实例验证。解析器也支持 event_alert.triggered，但当前未配置 Alert Rule Action。
 
 ## 2. 技术选型与部署拓扑
 
 - Go 1.27 的标准库 net/http、context、slog、http.Client 承担路由、超时和结构化日志。入口只有 webhook 与健康检查，暂不需要 Gin/Echo；[Go ServeMux](https://go.dev/blog/routing-enhancements/) 已支持按方法和路径注册。
-- PostgreSQL 17 与 pgx/v5 保存并领取持久作业。第一版只有 feedback_jobs 表，不依赖 Redis 或消息代理。
+- PostgreSQL 17 与 pgx/v5 保存并领取持久作业。feedback_jobs 负责 webhook 去重与建卡，rca_jobs 保存分析、报告 JSON 和钉钉投递状态。
 - 同一个 Go 进程运行 HTTP server 与轮询 worker。Compose 部署 app 和 db，数据库使用持久卷；app 只把 8787 端口绑定到主机回环地址，预期由现有 HTTPS 反向代理转发。
 - [Docker 多阶段构建](https://docs.docker.com/build/building/best-practices/)编译静态 Go 二进制，运行层采用 `scratch`、数字非 root 用户和从构建镜像复制的 CA 证书束；Compose 通过 [db 健康检查与 depends_on](https://docs.docker.com/compose/how-tos/startup-order/)控制启动顺序。
 - Teambition 企业内部应用鉴权默认用 AppID、AppSecret 向私有 `POST /gateway/appToken` 换取应用 token，按接口返回的有效期缓存，并作为 Bearer Token 调用任务创建接口；同时保留用户提供的 Python 本地签发 HS256 JWT 方式，由 `TEAMBITION_AUTH_MODE` 选择。第一版只依赖取 token 和建卡两个 Teambition 接口；图片上传辅助代码保留供后续联调，不在当前业务链路执行。
@@ -23,16 +23,20 @@ flowchart LR
     H --> D[(PostgreSQL: feedback_jobs)]
     D --> W[Go worker]
     W --> SA[Sentry Issue / Event API]
-    W --> J[获取并缓存 appToken]
+    W -->|平台问题，已启用项目| R[(rca_jobs)]
+    R --> A[AgentOS + Sentry MCP]
+    A -->|保存报告| R
+    R -->|有据可查的分析| DT[钉钉群机器人]
+    W -->|建卡项目| J[获取并缓存 appToken]
     J --> TA[Teambition 建卡 API]
     W --> D
 ```
 
-## 3. 第一版实际数据流
+## 3. Webhook 与建卡数据流
 
 1. **接收与验签。** POST /webhooks/sentry/user-feedback 限制 JSON 请求体为 1 MiB，以原始字节和 Sentry-Hook-Signature 做 HMAC-SHA256 验证。解析器只接收 FEEDBACK 类 issue.created 或符合条件的 event_alert.triggered；其他已验签投递返回 204。Sentry Webhook 的[签名和响应时限](https://docs.sentry.io/integrations/integration-platform/webhooks/)以及 [Issue FEEDBACK 事件](https://docs.sentry.io/integrations/integration-platform/webhooks/issues/)是此入口的协议依据。
 2. **持久化后应答。** 对接收的事件生成 issue:<issue_id> 去重键，向 feedback_jobs 做唯一键插入；重复投递命中 ON CONFLICT DO NOTHING。写入成功或已存在后返回 202，数据库写入失败返回 503。没有独立 webhook_inbox，也没有把原始反馈正文写入数据库。Sentry 对失败响应是否重投仍需实测。
-3. **领取并核实反馈。** worker 每秒尝试领取一个 pending/retry 作业，SQL 使用 FOR UPDATE SKIP LOCKED，并记录 attempts 与 10 分钟租约。worker 查询 Sentry Issue 与 Event API 核实类别及项目，再从反馈上下文或事件 tags 取分类、`taskType`、`dataset_id` 和正文。云环境从反馈业务页面 URL 的查询串读取：优先使用非空 `contexts.feedback.url`，仅在该字段缺失或空白时回退到 Event 的 `url` tag；只取唯一的 `server` 参数，去除首尾空格并转成大写。`TC` 表示腾讯云，`HS` 表示火山云。Sentry 的 `environment` 表示线上、测试、预发等部署环境，不参与云标签路由；正文、嵌套 URL、fragment 均不作为 `server` 来源。非目标项目或非反馈 Issue 标为 ignored；正文或链接缺失仍进入 needs_review。缺少任务类型或数据集不阻止建卡，使用标题兜底；平台异常使用平台兜底负责人，需求建议和数据问题仍可使用各自的固定负责人。
+3. **领取并核实反馈。** worker 每秒尝试领取一个 pending/retry 作业，SQL 使用 FOR UPDATE SKIP LOCKED，并记录 attempts 与 10 分钟租约。worker 查询 Sentry Issue 与 Event API 核实类别及项目，再从反馈上下文或事件 tags 取分类、`taskType`、`dataset_id` 和正文。云环境从反馈业务页面 URL 的查询串读取：优先使用非空 `contexts.feedback.url`，仅在该字段缺失或空白时回退到 Event 的 `url` tag；只取唯一的 `server` 参数，去除首尾空格并转成大写。`TC` 表示腾讯云，`HS` 表示火山云。Sentry 的 `environment` 表示线上、测试、预发等部署环境，不参与云标签路由；正文、嵌套 URL、fragment 均不作为 `server` 来源。确认反馈类别后，worker 按 Issue API 的项目 slug 核对分析清单，并为命中的平台问题写入 rca_jobs。建卡分支对非目标项目或非反馈 Issue 标记 ignored，正文或链接缺失时进入 needs_review。缺少任务类型或数据集不阻止建卡，使用标题兜底；平台异常使用平台兜底负责人，需求建议和数据问题仍可使用各自的固定负责人。
 4. **转换与路由。** `content` 使用 `【{taskType}: {dataset_id}】{反馈分类}：{问题描述摘要}`，分类为“平台异常／数据问题／需求建议／其他”。提取 `[问题描述]` 后内容，删除图片和链接地址、合并空白并截断；原始正文不做标题清洗。`internal/routing` 根据独立配置解析分类与云标签及单人负责人：`platform_bug` 查 `owners` 的原有四人任务类型映射，未命中则使用 `defaultPlatformExecutorId` 的张优为；`suggestion` 查独立的 `suggestionOwners`，张莹莹负责三种点云分割和 `TLR_4D`，武欣媛负责其余 38 种，未命中则使用 `categoryOwners.suggestion` 的武欣媛；`data_issue` 使用固定负责人。旧 `feature_gap` 或未知分类归 `other` 并记录待分流原因，不执行自动指派。`tagIds` 同时包含分类标签和按 `server=TC`／`server=HS` 匹配的腾讯云／火山云标签；URL 无有效查询串、`server` 缺失、未知或重复时只写分类标签。`note` 保留原文、Sentry 反馈链接和可选用户名。用户名先取 Issue `metadata.name`，再取 Event `contexts.feedback.name`；反馈链接继续沿用当前 Sentry UI 深链接逻辑。第一版不查询、下载或上传截图。
 5. **鉴权后建卡。** worker 调用 Teambition.Prepare：真实模式按需获取并缓存 appToken（或按配置在本地签发 JWT），不会准备图片。Prepare 成功后，数据库由 processing 转为 creating，才发送任务创建请求。若取 token 失败，作业仍在尚未发建卡请求的 processing 阶段重试或进入 needs_review。
 6. **确认结果。** Teambition 返回明确 task ID 且数据库成功写入后才置为 done。建卡请求超时、网络错误、5xx、响应不完整或 task ID 缺失时进入 uncertain；此状态不会被 worker 自动再次领取。明确的永久错误进入 needs_review。若创建成功但保存 task ID 失败，creating 租约过期后同样转 uncertain，防止盲目再建卡。
@@ -48,7 +52,9 @@ flowchart LR
 | internal/sentry     | 第一版读取 Issue/Event 并生成反馈链接；截图辅助代码暂不调用               |
 | internal/teambition | 在线 appToken 获取与缓存、本地 JWT、建卡请求与 Mock；上传辅助代码暂不调用 |
 | internal/worker     | 业务过滤、字段映射、调用 Prepare/Create、按失败阶段更新状态               |
-| internal/store      | feedback_jobs 迁移、去重插入、租约领取及状态转换                          |
+| internal/store      | feedback_jobs 与 rca_jobs 迁移、去重、租约和状态转换 |
+| internal/agentos    | 通过独立会话提交 Issue、读取流式回复并校验结构化报告 |
+| internal/dingtalk   | 渲染群消息并校验机器人发送回执 |
 | internal/config     | 环境变量、必需值检查及敏感值的 _FILE 读取                                 |
 | internal/routing    | 从 JSON 配置加载四类标签及负责人分组，校验后解析分类和单人指派            |
 
@@ -56,9 +62,9 @@ HTTP 路由实际为 POST /webhooks/sentry/user-feedback、GET /health/live（�
 
 路由配置保存在 `config/feedback-routing.json`，通过 `FEEDBACK_ROUTING_FILE` 加载。Compose 只读挂载该文件，适用于 scratch 运行镜像；修改后重启 adapter，不在运行中热更新。配置必须覆盖四类标签并提供单个 `defaultPlatformExecutorId`，升级旧配置时需补充此字段。`owners` 与 `suggestionOwners` 分别编译为独立任务类型映射，每个类型在各自映射中仅允许一名负责人。`categoryOwners` 只允许配置 `data_issue`、`suggestion`，分别作为数据问题固定负责人及需求建议兜底，不为其他类别指派。`environmentTags` 配置业务页面 URL 的 `server` 代码和云标签 ID，只支持 `TC`、`HS`，分别对应腾讯云、火山云。同一映射内重复任务类型、归一后重复云代码键（均忽略大小写及首尾空格）、不支持的云代码、无效 ID 或未知字段都会阻止启动。省略固定负责人时，相关类别在无任务类型匹配的情况下保持未指派并记录待分流原因。`TEAMBITION_EXECUTOR_ID` 不再参与卡片指派。分类和云标签在一次建卡请求中写入，且相同标签 ID 只添加一次；`tagIds` 与既有“标注平台”下拉 `customfields` 独立，共用任务场景仍由 `TEAMBITION_SCENARIO_ID` 提供。
 
-## 5. 第一版数据模型与状态机
+## 5. 数据模型与状态机
 
-数据库迁移在启动时由 internal/store 执行。当前唯一业务表 feedback_jobs 包含 dedup_key、organization、project、issue_id、event_id、status、attempts、next_attempt_at、lease_until、task_id、last_error 和时间戳；dedup_key 唯一。它同时承担去重、作业队列和已确认任务 ID 的映射。当前部署锁定一个 Sentry 组织与目标项目；如果扩成多租户，issue:<issue_id> 必须重新评估是否足以隔离租户。
+数据库迁移在启动时由 internal/store 执行。入口与建卡表 feedback_jobs 包含 dedup_key、organization、project、issue_id、event_id、status、attempts、next_attempt_at、lease_until、task_id、last_error 和时间戳；dedup_key 唯一。它同时承担去重、作业队列和已确认任务 ID 的映射。一个适配器面向一个 Sentry 组织，建卡另限定项目；如果扩成多租户，issue:<issue_id> 必须重新评估是否足以隔离租户。
 
 ```mermaid
 stateDiagram-v2
@@ -75,6 +81,8 @@ stateDiagram-v2
 ```
 
 processing 的可恢复错误最多尝试 5 次，当前退避为 2 的 attempts 次方秒，没有抖动。worker 启动时及运行中会恢复过期租约：processing → retry，creating → uncertain。uncertain 和 needs_review 需要人工核对与处理；目前没有自动查询 Teambition 是否已有任务、没有受控重放 CLI，也没有服务端幂等键已验证可用的证据。人工重发建卡前，应按任务备注中的 Sentry 反馈链接在 Teambition 查证；不能因本地 task_id 为空就推断未建卡。
+
+分析表 `rca_jobs` 按组织、项目和 Issue ID 去重。独立 worker 按当前启用的项目清单领取分析和投递作业，解析结构化输出，并将报告和待发送状态同时持久化。发送成功后记为 `done`。分析和明确限流各有独立的重试计数，最多各尝试 5 次。发送回执不明确或投递租约过期时记为 `uncertain`，待核对群消息。具体分类、配置和查询见 [平台问题分析与群通知](../README.md#平台问题分析与群通知)。
 
 ## 6. 已有安全措施与运维边界
 
