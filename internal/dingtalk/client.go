@@ -29,13 +29,22 @@ type Client struct {
 }
 
 type Report struct {
-	IssueID         string
-	Problem         string
-	Cause           string
-	Category        string
-	ConfidenceScore *int
-	NextStep        string
-	SentryURL       string
+	IssueID           string
+	FeedbackType      string
+	TaskType          string
+	DatasetID         string
+	AnalysisStatus    string
+	Problem           string
+	Cause             string
+	Category          string
+	Confidence        string
+	ConfidenceScore   *int
+	Evidence          string
+	Impact            string
+	SuggestedCategory string
+	TriageReason      string
+	NextStep          string
+	SentryURL         string
 }
 
 // Rejected means this call definitively did not post a message.
@@ -92,30 +101,11 @@ func (c *Client) Send(ctx context.Context, report Report) error {
 		!strings.EqualFold(link.Host, c.sentryBase.Host) {
 		return &Rejected{reason: "invalid Sentry issue link"}
 	}
-	confidence := "未评分"
-	if report.ConfidenceScore != nil {
-		score := *report.ConfidenceScore
-		if score < 0 || score > 100 {
-			return &Rejected{reason: "confidence score outside 0–100"}
-		}
-		confidence = fmt.Sprintf("%d/100", score)
+	content, err := renderReport(report, link)
+	if err != nil {
+		return err
 	}
-	message := robotMessage{Type: "markdown", Markdown: markdown{
-		Title: keyword + "｜用户反馈初步分析",
-		Text: strings.Join([]string{
-			"### " + keyword + " · 用户反馈初步分析",
-			"",
-			"- **Issue** " + markdownText(report.IssueID, "未提供"),
-			"- **问题** " + markdownText(report.Problem, "未提供"),
-			"- **初步原因** " + markdownText(report.Cause, "证据不足"),
-			"- **分类** " + markdownText(report.Category, "未分类"),
-			"- **置信度** " + confidence,
-			"- **下一步** " + markdownText(report.NextStep, "待进一步核实"),
-			"",
-			"[查看 Sentry 反馈](" + markdownLink.Replace(link.String()) + ")",
-		}, "\n"),
-	}}
-	body, err := json.Marshal(message)
+	body, err := json.Marshal(robotMessage{Type: "markdown", Markdown: content})
 	if err != nil {
 		return &Rejected{reason: "unable to encode notification"}
 	}
@@ -152,6 +142,108 @@ func (c *Client) Send(ctx context.Context, report Report) error {
 	return nil
 }
 
+func renderReport(report Report, link *url.URL) (markdown, error) {
+	var subject string
+	var details []string
+	switch report.FeedbackType {
+	case "", "platform_bug": // Reports created before the category rollout were platform bugs.
+		subject = "平台异常"
+		confidence := "未评分"
+		if score := report.ConfidenceScore; score != nil {
+			if *score < 0 || *score > 100 {
+				return markdown{}, &Rejected{reason: "confidence score outside 0–100"}
+			}
+			confidence = fmt.Sprintf("%d/100", *score)
+			if report.Confidence != "" {
+				confidence = markdownText(report.Confidence, "未知") + "（" + confidence + "）"
+			}
+		}
+		details = []string{
+			"- **初步原因** " + reportText(report.Cause, "待核实"),
+			"- **分类** " + reportText(report.Category, "无法判定"),
+			"- **置信度** " + confidence,
+		}
+	case "data_issue":
+		subject = "数据问题"
+		details = []string{"- **影响范围** " + reportText(report.Impact, "待核实")}
+	case "other":
+		subject = "其他反馈分流"
+		details = []string{
+			"- **建议分类** " + suggestedCategoryLabel(report.SuggestedCategory),
+			"- **分流依据** " + reportText(report.TriageReason, "待核实"),
+		}
+	default:
+		return markdown{}, &Rejected{reason: "unsupported feedback type"}
+	}
+
+	title := keyword + "｜" + subject
+	if task := markdownText(report.TaskType, ""); task != "" {
+		title += "｜" + task
+	}
+	if dataset := markdownText(report.DatasetID, ""); dataset != "" {
+		title += "｜数据集 " + dataset
+	}
+	lines := []string{"### " + title, "", "- **Issue** " + markdownText(report.IssueID, "未提供")}
+	if status := markdownText(report.AnalysisStatus, ""); status != "" {
+		lines = append(lines, "- **分析状态** "+status)
+	}
+	lines = append(lines, "- **问题** "+reportText(report.Problem, "未提供"))
+	lines = append(lines, details...)
+	lines = append(lines,
+		"- **证据** "+reportText(report.Evidence, "见原始反馈"),
+		"- **下一步** "+reportText(report.NextStep, "待进一步核实"),
+		"", "[查看 Sentry 反馈]("+markdownLink.Replace(link.String())+")",
+	)
+	return markdown{Title: title, Text: strings.Join(lines, "\n")}, nil
+}
+
+func suggestedCategoryLabel(value string) string {
+	switch value {
+	case "platform_bug":
+		return "平台异常"
+	case "data_issue":
+		return "数据问题"
+	case "suggestion":
+		return "需求建议"
+	case "other":
+		return "其他"
+	default:
+		return "待人工分流"
+	}
+}
+
+// Summaries sometimes copy a whole list of internal IDs from the Sentry context.
+// Keep the actionable dataset number and replace a contiguous list only once.
+const (
+	refValueSep = `\s*(?:[=:：]\s*)?`
+	taskRef     = `\b(?:clips?_?id|data_?pool_?id|requirement(?:_?id)?|replay(?:_?id)?)\b` + refValueSep +
+		`(?:[0-9a-f]{4,}(?:…+|\.{3})[0-9a-f]*|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{8,})`
+	datasetRef = `\bdataset_?id\b` + refValueSep + `([0-9]+)\b`
+	namedRef   = `(?:` + taskRef + `|` + datasetRef + `)`
+)
+
+var (
+	reportRefList = regexp.MustCompile(`(?i)` + namedRef + `(?:\s*[,，、]\s*` + namedRef + `)*`)
+	reportDataset = regexp.MustCompile(`(?i)` + datasetRef)
+)
+
+func reportText(value, fallback string) string {
+	value = reportRefList.ReplaceAllStringFunc(sanitizedText(value), func(list string) string {
+		if matches := reportDataset.FindAllStringSubmatch(list, -1); len(matches) != 0 {
+			ids := make([]string, 0, len(matches))
+			for _, match := range matches {
+				ids = append(ids, match[1])
+			}
+			return "数据集 " + strings.Join(ids, "、")
+		}
+		if strings.HasPrefix(strings.ToLower(list), "replay") {
+			return "该回放"
+		}
+		return "该任务"
+	})
+	return escapeField(value, fallback)
+}
+
 func isAbsoluteWebURL(u *url.URL) bool {
 	return u != nil && (u.Scheme == "https" || u.Scheme == "http") && u.Hostname() != "" &&
 		u.User == nil && u.Opaque == ""
@@ -168,6 +260,10 @@ var (
 )
 
 func markdownText(value, fallback string) string {
+	return escapeField(sanitizedText(value), fallback)
+}
+
+func sanitizedText(value string) string {
 	value = strings.Join(strings.Fields(value), " ")
 	value = strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
@@ -175,11 +271,14 @@ func markdownText(value, fallback string) string {
 		}
 		return r
 	}, value)
+	value = secretValue.ReplaceAllString(value, "（凭据已隐藏）")
+	return inlineURL.ReplaceAllString(value, "（链接已省略）")
+}
+
+func escapeField(value, fallback string) string {
 	if value == "" {
 		return fallback
 	}
-	value = secretValue.ReplaceAllString(value, "（凭据已隐藏）")
-	value = inlineURL.ReplaceAllString(value, "（链接已省略）")
 	if runes := []rune(value); len(runes) > maxFieldRunes {
 		value = string(runes[:maxFieldRunes]) + "…"
 	}

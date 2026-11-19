@@ -13,7 +13,7 @@ import (
 )
 
 type analyzer interface {
-	Analyze(context.Context, string, string, string) (json.RawMessage, error)
+	Analyze(context.Context, string, string, string, string) (json.RawMessage, error)
 }
 
 type robotSender interface {
@@ -59,7 +59,7 @@ func (w *RCAWorker) Run(ctx context.Context) {
 
 func (w *RCAWorker) process(ctx context.Context, j store.RCAJob) error {
 	if j.Stage == store.RCAAnalyzing {
-		raw, err := w.Agent.Analyze(ctx, j.IssueID, j.IssueURL, j.EventID)
+		raw, err := w.Agent.Analyze(ctx, j.IssueID, j.IssueURL, j.EventID, j.FeedbackType)
 		finalCtx, finish := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer finish()
 		if err != nil {
@@ -69,7 +69,7 @@ func (w *RCAWorker) process(ctx context.Context, j store.RCAJob) error {
 			}
 			return w.Store.RetryRCA(finalCtx, j, "AgentOS analysis unavailable or incomplete")
 		}
-		report, err := agentos.ParseReport(raw)
+		report, err := agentos.ParseReportForType(raw, j.FeedbackType)
 		if err != nil {
 			return w.Store.RetryRCA(finalCtx, j, "invalid AgentOS report")
 		}
@@ -79,14 +79,19 @@ func (w *RCAWorker) process(ctx context.Context, j store.RCAJob) error {
 		return w.Store.SaveRCAReport(finalCtx, j, raw)
 	}
 
-	report, err := agentos.ParseReport(j.Report)
+	report, err := agentos.ParseReportForType(j.Report, j.FeedbackType)
 	if err != nil || !report.Notifiable() {
 		return w.Store.ReviewRCA(ctx, j, "stored report is not deliverable")
 	}
+	evidence, _ := report.FirstEvidence()
 	message := dingtalk.Report{
 		IssueID: j.IssueID, SentryURL: j.IssueURL, Problem: report.FeedbackSummary.Description,
+		FeedbackType: j.FeedbackType, TaskType: j.TaskType, DatasetID: j.DatasetID,
+		AnalysisStatus: report.AnalysisStatus, Evidence: evidence.Observation,
+		Impact:            report.FeedbackSummary.Impact,
+		SuggestedCategory: report.Triage.SuggestedCategory, TriageReason: report.Triage.Reason,
 		Cause: report.RootCause.Conclusion, Category: report.RootCause.Category,
-		ConfidenceScore: report.RootCause.ConfidenceScore,
+		Confidence: report.RootCause.Confidence, ConfidenceScore: report.RootCause.ConfidenceScore,
 	}
 	if steps := report.Recommendations.VerificationSteps; len(steps) > 0 {
 		message.NextStep = steps[0]

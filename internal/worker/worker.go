@@ -80,11 +80,12 @@ func (w *Worker) process(ctx context.Context, j store.Job) {
 	decision := w.Routing.Resolve(f.Kind, f.TaskType, f.CloudServer)
 	// Use the project from the authenticated Issue API for the RCA rollout.
 	// Teambition checks its own project below.
-	if w.RCAEnabled && decision.FeedbackType == "platform_bug" &&
+	if w.RCAEnabled && shouldAnalyzeFeedback(f.Kind, decision.FeedbackType) &&
 		(len(w.RCAAllowedProjects) == 0 || slices.Contains(w.RCAAllowedProjects, f.Project)) {
 		err := w.Store.EnqueueRCA(ctx, store.RCAJob{
 			Organization: w.Organization, Project: f.Project, IssueID: f.IssueID,
-			EventID: f.EventID, IssueURL: f.IssueURL,
+			EventID: f.EventID, IssueURL: f.IssueURL, FeedbackType: decision.FeedbackType,
+			TaskType: f.TaskType, DatasetID: f.DatasetID,
 		})
 		if err != nil {
 			log.Error("enqueue feedback analysis", "error", err)
@@ -145,6 +146,19 @@ func (w *Worker) process(ctx context.Context, j store.Job) {
 		return
 	}
 	log.Info("card created", "task_id", taskID)
+}
+
+func shouldAnalyzeFeedback(rawType, routedType string) bool {
+	switch routedType {
+	case "platform_bug", "data_issue":
+		return true
+	case "other":
+		// Teambition also routes missing and legacy categories to its catch-all.
+		// Only a deliberately selected "other" requests AI triage.
+		return strings.EqualFold(strings.TrimSpace(rawType), "other")
+	default:
+		return false
+	}
 }
 
 func (w *Worker) finish(_ context.Context, log *slog.Logger, err error) {

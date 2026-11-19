@@ -55,7 +55,7 @@ func newRCAStore(t *testing.T) *Store {
 
 func enqueueRCA(t *testing.T, s *Store, issue string) {
 	t.Helper()
-	j := RCAJob{Organization: "test", Project: "web", IssueID: issue, IssueURL: "https://example.test/issues/" + issue}
+	j := RCAJob{Organization: "test", Project: "web", IssueID: issue, IssueURL: "https://example.test/issues/" + issue, FeedbackType: "platform_bug"}
 	if err := s.EnqueueRCA(t.Context(), j); err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +92,29 @@ func assertRCAStatus(t *testing.T, s *Store, id int64, want string) {
 	}
 }
 
+func TestRCAMigrationPreservesQueuedPlatformJobs(t *testing.T) {
+	s := newRCAStore(t)
+	// Rebuild the previous schema in this test's isolated namespace, with a
+	// job waiting in each stage at the moment of the upgrade.
+	runRCAQuery(t, s, "ALTER TABLE rca_jobs DROP COLUMN feedback_type, DROP COLUMN task_type, DROP COLUMN dataset_id")
+	runRCAQuery(t, s, `INSERT INTO rca_jobs (organization, project, issue_id, issue_url, status, report)
+		VALUES ('org','web','1','https://example.test/issues/1','pending_analysis',null),
+		       ('org','web','2','https://example.test/issues/2','pending_delivery','{"issue_key":"old-report"}')`)
+	if err := s.Migrate(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	delivery := claimStage(t, s, RCADelivering, 1)
+	analysis := claimStage(t, s, RCAAnalyzing, 1)
+	if delivery.IssueID != "2" || analysis.IssueID != "1" || len(delivery.Report) == 0 {
+		t.Fatalf("upgrade lost legacy jobs: analysis=%+v delivery=%+v", analysis, delivery)
+	}
+	for _, j := range []RCAJob{analysis, delivery} {
+		if j.FeedbackType != "platform_bug" || j.TaskType != "" || j.DatasetID != "" {
+			t.Fatalf("unexpected metadata after upgrade: %+v", j)
+		}
+	}
+}
+
 func TestRCAProjectSwitchPausesQueuedAnalysisAndDelivery(t *testing.T) {
 	s := newRCAStore(t)
 	ctx := t.Context()
@@ -99,7 +122,7 @@ func TestRCAProjectSwitchPausesQueuedAnalysisAndDelivery(t *testing.T) {
 	const productionProject = "anno-dev"
 	enqueue := func(id, project string) {
 		t.Helper()
-		job := RCAJob{Organization: "test", Project: project, IssueID: id, IssueURL: "https://example.test/issues/" + id}
+		job := RCAJob{Organization: "test", Project: project, IssueID: id, IssueURL: "https://example.test/issues/" + id, FeedbackType: "platform_bug"}
 		if err := s.EnqueueRCA(ctx, job); err != nil {
 			t.Fatal(err)
 		}
@@ -134,7 +157,12 @@ func TestRCAProjectSwitchPausesQueuedAnalysisAndDelivery(t *testing.T) {
 func TestRCAStoredReportSurvivesDeliveryRetry(t *testing.T) {
 	s := newRCAStore(t)
 	ctx := t.Context()
-	enqueueRCA(t, s, "42")
+	job := RCAJob{Organization: "test", Project: "web", IssueID: "42", IssueURL: "https://example.test/issues/42",
+		FeedbackType: "data_issue", TaskType: "Driving_Lane", DatasetID: "573124"}
+	if err := s.EnqueueRCA(ctx, job); err != nil {
+		t.Fatal(err)
+	}
+	// Duplicate webhooks cannot change an in-flight report's analysis mode or task identity.
 	enqueueRCA(t, s, "42")
 	analysis := claimStage(t, s, RCAAnalyzing, 1)
 	assertNoRCAClaim(t, s)
@@ -149,6 +177,11 @@ func TestRCAStoredReportSurvivesDeliveryRetry(t *testing.T) {
 	assertNoRCAClaim(t, s)
 	runRCAQuery(t, s, "UPDATE rca_jobs SET next_attempt_at=now() WHERE id=$1", delivery.ID)
 	next := claimStage(t, s, RCADelivering, 2)
+	for _, claimed := range []RCAJob{analysis, delivery, next} {
+		if claimed.FeedbackType != job.FeedbackType || claimed.TaskType != job.TaskType || claimed.DatasetID != job.DatasetID {
+			t.Fatalf("claim lost original feedback metadata: %+v", claimed)
+		}
+	}
 	var restored struct {
 		Issue string `json:"issue_key"`
 	}

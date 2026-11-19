@@ -4,7 +4,7 @@
 
 ## 1. 目标与边界
 
-服务接收自建 Sentry 的 Issue webhook，为建卡从指定组织和项目读取 User Feedback 的 Issue、Event，在固定的 Teambition 项目创建反馈任务，按配置写入分类标签和匹配的云环境标签；平台异常与需求建议分别按任务类型匹配一名负责人，未命中时使用各自的兜底负责人，数据问题使用固定负责人，其他类别不指派。第一版不查询、下载或上传截图；任务备注保留反馈原文、Sentry 链接及可选用户名。建卡目标 Sentry 项目由 `SENTRY_PROJECT` 配置。启用 `RCA_ENABLED` 后，适配器先为同一组织中 `RCA_ALLOWED_PROJECTS` 已启用项目的 `platform_bug` 反馈创建分析作业，再判断是否建卡。新作业按 Issue 去重，历史反馈不会自动回放。
+服务接收自建 Sentry 的 Issue webhook，为建卡从指定组织和项目读取 User Feedback 的 Issue、Event，在固定的 Teambition 项目创建反馈任务，按配置写入分类标签和匹配的云环境标签；平台异常与需求建议分别按任务类型匹配一名负责人，未命中时使用各自的兜底负责人，数据问题使用固定负责人，其他类别不指派。第一版不查询、下载或上传截图；任务备注保留反馈原文、Sentry 链接及可选用户名。建卡目标 Sentry 项目由 `SENTRY_PROJECT` 配置。启用 `RCA_ENABLED` 后，适配器先为同一组织中 `RCA_ALLOWED_PROJECTS` 已启用项目的 平台异常、数据问题和明确选择“其他”的反馈创建分析作业，再判断是否建卡。需求建议仅参与既有建卡流程。历史反馈不会因升级自动补跑。
 
 已知 Sentry Internal Integration 配置了 https://sentry-adapter.gwm-adas.com/webhooks/sentry/user-feedback，订阅 Issue webhook；实际 FEEDBACK 类 issue.created 是否投递仍要在目标 Sentry 26.6 实例验证。解析器也支持 event_alert.triggered，但当前未配置 Alert Rule Action。
 
@@ -23,11 +23,11 @@ flowchart LR
     H --> D[(PostgreSQL: feedback_jobs)]
     D --> W[Go worker]
     W --> SA[Sentry Issue / Event API]
-    W -->|平台问题，已启用项目| R[(rca_jobs)]
+    W -->|允许项目的平台异常、数据问题、其他| R[(rca_jobs)]
     R --> A[AgentOS + Sentry MCP]
     A -->|保存报告| R
-    R -->|有据可查的分析| DT[钉钉群机器人]
-    W -->|建卡项目| J[获取并缓存 appToken]
+    R -->|分类报告通过校验且含证据| DT[钉钉群机器人]
+    W -->|建卡项目的四类反馈| J[获取并缓存 appToken]
     J --> TA[Teambition 建卡 API]
     W --> D
 ```
@@ -36,7 +36,7 @@ flowchart LR
 
 1. **接收与验签。** POST /webhooks/sentry/user-feedback 限制 JSON 请求体为 1 MiB，以原始字节和 Sentry-Hook-Signature 做 HMAC-SHA256 验证。解析器只接收 FEEDBACK 类 issue.created 或符合条件的 event_alert.triggered；其他已验签投递返回 204。Sentry Webhook 的[签名和响应时限](https://docs.sentry.io/integrations/integration-platform/webhooks/)以及 [Issue FEEDBACK 事件](https://docs.sentry.io/integrations/integration-platform/webhooks/issues/)是此入口的协议依据。
 2. **持久化后应答。** 对接收的事件生成 issue:<issue_id> 去重键，向 feedback_jobs 做唯一键插入；重复投递命中 ON CONFLICT DO NOTHING。写入成功或已存在后返回 202，数据库写入失败返回 503。没有独立 webhook_inbox，也没有把原始反馈正文写入数据库。Sentry 对失败响应是否重投仍需实测。
-3. **领取并核实反馈。** worker 每秒尝试领取一个 pending/retry 作业，SQL 使用 FOR UPDATE SKIP LOCKED，并记录 attempts 与 10 分钟租约。worker 查询 Sentry Issue 与 Event API 核实类别及项目，再从反馈上下文或事件 tags 取分类、`taskType`、`dataset_id` 和正文。云环境从反馈业务页面 URL 的查询串读取：优先使用非空 `contexts.feedback.url`，仅在该字段缺失或空白时回退到 Event 的 `url` tag；只取唯一的 `server` 参数，去除首尾空格并转成大写。`TC` 表示腾讯云，`HS` 表示火山云。Sentry 的 `environment` 表示线上、测试、预发等部署环境，不参与云标签路由；正文、嵌套 URL、fragment 均不作为 `server` 来源。确认反馈类别后，worker 按 Issue API 的项目 slug 核对分析清单，并为命中的平台问题写入 rca_jobs。建卡分支对非目标项目或非反馈 Issue 标记 ignored，正文或链接缺失时进入 needs_review。缺少任务类型或数据集不阻止建卡，使用标题兜底；平台异常使用平台兜底负责人，需求建议和数据问题仍可使用各自的固定负责人。
+3. **领取并核实反馈。** worker 每秒尝试领取一个 pending/retry 作业，SQL 使用 FOR UPDATE SKIP LOCKED，并记录 attempts 与 10 分钟租约。worker 查询 Sentry Issue 与 Event API 核实类别及项目，再从反馈上下文或事件 tags 取分类、`taskType`、`dataset_id` 和正文。云环境从反馈业务页面 URL 的查询串读取：优先使用非空 `contexts.feedback.url`，仅在该字段缺失或空白时回退到 Event 的 `url` tag；只取唯一的 `server` 参数，去除首尾空格并转成大写。`TC` 表示腾讯云，`HS` 表示火山云。Sentry 的 `environment` 表示线上、测试、预发等部署环境，不参与云标签路由；正文、嵌套 URL、fragment 均不作为 `server` 来源。确认反馈类别后，worker 按 Issue API 的项目 slug 核对分析清单，将允许项目的三类分析作业写入 `rca_jobs`，保存原始反馈对应的分析类型、任务品类和数据集 ID。建卡分支对非目标项目或非反馈 Issue 标记 ignored，正文或链接缺失时进入 needs_review。缺少任务类型或数据集不阻止建卡，使用标题兜底；平台异常使用平台兜底负责人，需求建议和数据问题仍可使用各自的固定负责人。
 4. **转换与路由。** `content` 使用 `【{taskType}: {dataset_id}】{反馈分类}：{问题描述摘要}`，分类为“平台异常／数据问题／需求建议／其他”。提取 `[问题描述]` 后内容，删除图片和链接地址、合并空白并截断；原始正文不做标题清洗。`internal/routing` 根据独立配置解析分类与云标签及单人负责人：`platform_bug` 查 `owners` 的原有四人任务类型映射，未命中则使用 `defaultPlatformExecutorId` 的张优为；`suggestion` 查独立的 `suggestionOwners`，张莹莹负责三种点云分割和 `TLR_4D`，武欣媛负责其余 38 种，未命中则使用 `categoryOwners.suggestion` 的武欣媛；`data_issue` 使用固定负责人。旧 `feature_gap` 或未知分类归 `other` 并记录待分流原因，不执行自动指派。`tagIds` 同时包含分类标签和按 `server=TC`／`server=HS` 匹配的腾讯云／火山云标签；URL 无有效查询串、`server` 缺失、未知或重复时只写分类标签。`note` 保留原文、Sentry 反馈链接和可选用户名。用户名先取 Issue `metadata.name`，再取 Event `contexts.feedback.name`；反馈链接继续沿用当前 Sentry UI 深链接逻辑。第一版不查询、下载或上传截图。
 5. **鉴权后建卡。** worker 调用 Teambition.Prepare：真实模式按需获取并缓存 appToken（或按配置在本地签发 JWT），不会准备图片。Prepare 成功后，数据库由 processing 转为 creating，才发送任务创建请求。若取 token 失败，作业仍在尚未发建卡请求的 processing 阶段重试或进入 needs_review。
 6. **确认结果。** Teambition 返回明确 task ID 且数据库成功写入后才置为 done。建卡请求超时、网络错误、5xx、响应不完整或 task ID 缺失时进入 uncertain；此状态不会被 worker 自动再次领取。明确的永久错误进入 needs_review。若创建成功但保存 task ID 失败，creating 租约过期后同样转 uncertain，防止盲目再建卡。
@@ -82,7 +82,7 @@ stateDiagram-v2
 
 processing 的可恢复错误最多尝试 5 次，当前退避为 2 的 attempts 次方秒，没有抖动。worker 启动时及运行中会恢复过期租约：processing → retry，creating → uncertain。uncertain 和 needs_review 需要人工核对与处理；目前没有自动查询 Teambition 是否已有任务、没有受控重放 CLI，也没有服务端幂等键已验证可用的证据。人工重发建卡前，应按任务备注中的 Sentry 反馈链接在 Teambition 查证；不能因本地 task_id 为空就推断未建卡。
 
-分析表 `rca_jobs` 按组织、项目和 Issue ID 去重。独立 worker 按当前启用的项目清单领取分析和投递作业，解析结构化输出，并将报告和待发送状态同时持久化。发送成功后记为 `done`。分析和明确限流各有独立的重试计数，最多各尝试 5 次。发送回执不明确或投递租约过期时记为 `uncertain`，待核对群消息。具体分类、配置和查询见 [平台问题分析与群通知](../README.md#平台问题分析与群通知)。
+分析表 `rca_jobs` 按组织、项目和 Issue ID 去重。新作业保存分析类型、任务品类和数据集。升级前的待分析和待投递作业继续按平台异常处理。独立 worker 根据允许项目清单领取作业，按用户原始类别校验 AgentOS 的 JSON，然后将报告与待发送状态同时持久化。平台异常展示疑似原因和置信度，数据问题展示影响范围，其他反馈展示分流建议及依据。消息附一条证据观察和下一步。发送成功后记为 `done`。分析和明确限流各有独立的重试计数，最多各尝试 5 次。发送回执不明确或投递租约过期时记为 `uncertain`，待核对群消息。字段、配置和查询见 [用户反馈分析与群通知](../README.md#用户反馈分析与群通知)。
 
 ## 6. 已有安全措施与运维边界
 

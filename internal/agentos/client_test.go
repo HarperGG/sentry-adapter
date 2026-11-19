@@ -53,7 +53,7 @@ func TestAnalyzePublishedWireFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := c.Analyze(context.Background(), "17", "https://sentry.example/issues/17/", "event-17")
+	raw, err := c.Analyze(context.Background(), "17", "https://sentry.example/issues/17/", "event-17", "platform_bug")
 	if err != nil || string(raw) != reportJSON {
 		t.Fatalf("report mismatch (%v)", err)
 	}
@@ -68,7 +68,7 @@ func TestStreamRequiresCompletedAssistantReport(t *testing.T) {
 		"stale":      textFrame("```json\n"+reportJSON+"\n```\n取证失败。") + doneFrame,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := readReportStream(strings.NewReader(stream)); err == nil {
+			if _, err := readReportStream(strings.NewReader(stream), "platform_bug"); err == nil {
 				t.Fatal("accepted unusable report")
 			}
 		})
@@ -88,7 +88,7 @@ func TestSessionFailureStopsBeforeChat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.Analyze(context.Background(), "17", "", "")
+	_, err = client.Analyze(context.Background(), "17", "", "", "platform_bug")
 	if err == nil || chatCalls != 0 {
 		t.Fatalf("err=%v, chat calls=%d", err, chatCalls)
 	}
@@ -103,7 +103,7 @@ func TestHTTPStatusPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.Analyze(context.Background(), "17", "", "")
+	_, err = client.Analyze(context.Background(), "17", "", "", "platform_bug")
 	var api *APIError
 	if !errors.As(err, &api) || api.Status != 429 || !api.Retryable() {
 		t.Fatalf("got %v", err)
@@ -113,17 +113,17 @@ func TestHTTPStatusPreserved(t *testing.T) {
 func TestReportEligibility(t *testing.T) {
 	for _, status := range []string{"分析失败", "信息不足"} {
 		b, _ := json.Marshal(map[string]string{"analysis_status": status})
-		r, err := ParseReport(b)
+		r, err := ParseReportForType(b, "platform_bug")
 		if err != nil || r.Notifiable() {
 			t.Fatalf("status %s: notifiable=%v, err=%v", status, r.Notifiable(), err)
 		}
 	}
 	for _, bad := range []string{`{}`, `{"analysis_status":"success"}`, `{"analysis_status":"分析完成"}`} {
-		if _, err := ParseReport([]byte(bad)); err == nil {
+		if _, err := ParseReportForType([]byte(bad), "platform_bug"); err == nil {
 			t.Fatalf("accepted %s", bad)
 		}
 	}
-	r, err := ParseReport([]byte(reportJSON))
+	r, err := ParseReportForType([]byte(reportJSON), "platform_bug")
 	if err != nil || !r.Notifiable() {
 		t.Fatalf("sample report: notifiable=%v, err=%v", r.Notifiable(), err)
 	}

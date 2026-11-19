@@ -12,7 +12,7 @@ import (
 const maxStreamSize = 16 << 20
 
 // readReportStream extracts the application response, never Sentry tool outputs.
-func readReportStream(body io.Reader) (json.RawMessage, error) {
+func readReportStream(body io.Reader, feedbackType string) (json.RawMessage, error) {
 	limited := &io.LimitedReader{R: body, N: maxStreamSize + 1}
 	scanner := bufio.NewScanner(limited)
 	scanner.Buffer(make([]byte, 32<<10), maxStreamSize)
@@ -64,7 +64,7 @@ func readReportStream(body io.Reader) (json.RawMessage, error) {
 				return nil, err
 			}
 			if done {
-				return extractReport(reply.String())
+				return extractReport(reply.String(), feedbackType)
 			}
 			event = ""
 			data = data[:0]
@@ -87,14 +87,14 @@ func readReportStream(body io.Reader) (json.RawMessage, error) {
 	if !done {
 		return nil, errors.New("AgentOS stream ended before completion")
 	}
-	return extractReport(reply.String())
+	return extractReport(reply.String(), feedbackType)
 }
 
-func extractReport(reply string) (json.RawMessage, error) {
+func extractReport(reply, feedbackType string) (json.RawMessage, error) {
 	const fence = "```"
 	s := strings.TrimSpace(strings.ReplaceAll(reply, "\r\n", "\n"))
 	if strings.HasPrefix(s, "{") && json.Valid([]byte(s)) {
-		if _, err := ParseReport([]byte(s)); err != nil {
+		if _, err := ParseReportForType([]byte(s), feedbackType); err != nil {
 			return nil, err
 		}
 		return json.RawMessage(s), nil
@@ -110,7 +110,7 @@ func extractReport(reply string) (json.RawMessage, error) {
 		}
 		if strings.EqualFold(line, fence+"json") {
 			raw := json.RawMessage(strings.TrimSpace(strings.Join(lines[i+1:len(lines)-1], "\n")))
-			if _, err := ParseReport(raw); err != nil {
+			if _, err := ParseReportForType(raw, feedbackType); err != nil {
 				return nil, err
 			}
 			return raw, nil

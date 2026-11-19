@@ -1,13 +1,17 @@
 # Sentry 用户反馈适配器
 
-这是一个 Go 服务，接收 Sentry 用户反馈 webhook。指定项目的反馈按原有规则创建 Teambition 任务。开启 AgentOS 分析后，适配器按 Issue ID 分析已启用项目的“平台问题”，并将结果发到钉钉群。[架构与实现](docs/architecture.md)
+这是一个 Go 服务，接收 Sentry 用户反馈 webhook，在指定项目创建 Teambition 任务。开启 AgentOS 后，适配器为允许项目中的平台异常、数据问题和用户选择的“其他”创建分析作业，通过校验的报告发送到钉钉群。[架构与实现](docs/architecture.md)
 
-## 平台问题分析与群通知
+## 用户反馈分析与群通知
+
+应用 `200004` 已发布的系统指令见[反馈分析提示词](docs/agentos-feedback-prompt.md)。调整报告字段时，需同步更新 AgentOS 的系统指令与适配器的报告校验。
 
 | Sentry 已核实的反馈 | AgentOS 分析与钉钉通知 | Teambition 建卡 |
 | --- | --- | --- |
-| 平台问题 `platform_bug` | 仅分析 `RCA_ALLOWED_PROJECTS` 启用的项目，有证据的结论发到群里 | 仅 `SENTRY_PROJECT` |
-| 需求建议、数据问题、其他 | 本阶段跳过 | 仅 `SENTRY_PROJECT`，沿用原分类与指派规则 |
+| 平台异常 `platform_bug` | 分析初步原因、问题分类和置信度 | 仅 `SENTRY_PROJECT`，按品类指派 |
+| 数据问题 `data_issue` | 整理现象、已知或待核实的影响范围及下一步核查动作 | 仅 `SENTRY_PROJECT`，指派数据问题负责人 |
+| 其他 `other` | 用户明确选择“其他”时给出建议分类、分流依据和下一步。建议归为需求建议时，分流到此结束 | 仅 `SENTRY_PROJECT`，按原分类建卡，留待指派 |
+| 需求建议 `suggestion` | 跳过 AI 分析与钉钉分析通知 | 仅 `SENTRY_PROJECT`，按需求建议规则指派 |
 
 本部署按 Sentry 项目区分环境。`anno-seg-test` 是测试项目，`anno-dev` 是线上项目。适配器以 Sentry Issue API 返回的项目 slug 精确匹配分析清单。已启用项目的腾讯云、火山云和未标明云环境的反馈均可分析。每个来源项目需要投递 webhook，并允许适配器与 AgentOS 的 Sentry MCP 读取 Issue 与 Event。
 
@@ -25,15 +29,17 @@ DINGTALK_WEBHOOK_URL=<群机器人的完整 HTTPS webhook>
 
 应用默认使用 `AGENTOS_APP_ID=200004`、`AGENTOS_USER_ID=sentry-adapter`，网关为 `https://prod-gateway-cloud.gwm-adas.com/armory-core/api/v1`。可用 `AGENTOS_BASE_URL` 覆盖网关地址。如果接入网关启用了 Bearer 鉴权，配置 `AGENTOS_BEARER_TOKEN`。机器人地址与 Bearer token 也支持通过对应的 `_FILE` 变量指定容器内的凭据文件。修改配置后重新创建适配器容器。
 
-适配器调用 `create_session` 为每次分析建立独立会话，再通过 `chat_stream` 提交 Issue ID、反馈链接和 Event ID。AgentOS 应用通过 Sentry MCP 读取上下文，输出结构化 JSON，包括问题描述、根因分类、初步结论、证据、置信度和核实建议。反馈人选的“平台问题”决定是否启动分析，根因分类由证据决定，因此平台反馈也可能归因为数据或网络问题。[Sentry Issue API](https://docs.sentry.io/api/events/retrieve-an-issue/) · [Issue Event API](https://docs.sentry.io/api/events/retrieve-an-issue-event/)
+适配器调用 `create_session` 为每次分析建立独立会话，通过 `chat_stream` 传入用户反馈类型、Issue ID、反馈链接和反馈事件本身的 Event ID。AgentOS 通过 Sentry MCP 读取对应 Issue 和 Event，再根据该类型返回结构化 JSON。平台异常沿用根因报告；数据问题使用 `feedback_summary.impact` 记录影响范围；其他反馈使用 `triage.suggested_category` 和 `triage.reason` 记录分流建议。历史 `bug`、`defect` 按平台异常处理。`feature_gap`、缺失或未知类型沿用建卡的人工分流规则，跳过 AI 分析。[Sentry Issue API](https://docs.sentry.io/api/events/retrieve-an-issue/) · [Issue Event API](https://docs.sentry.io/api/events/retrieve-an-issue-event/)
 
-完整 JSON 保存在 `rca_jobs.report`。群消息展示问题、初步原因、分类、置信度、建议和 Sentry 链接，关闭人员提醒。报告缺少证据或分析失败时进入 `needs_review`。同一 Issue 的重复 webhook 复用已有作业。机器人明确限流时，仅重试发送已保存的报告。发送超时或回执不明确时进入 `uncertain`，可按 Issue ID 到群中核对。
+完整 JSON 保存在 `rca_jobs.report`。状态为“分析完成”或“部分完成”、通过该类型字段校验且至少有一条带引用的观察时，适配器发送群消息。标题显示反馈类型，并在有值时显示品类和数据集；正文附分析状态、问题、该类型的研判结果、一条证据、下一步及 Sentry 链接。报告为“信息不足”“分析失败”或缺少证据时，作业进入 `needs_review`。
+
+作业按组织、项目和 Issue ID 去重，每个 Issue 独立分析。机器人明确限流时重试发送已保存的报告；发送超时或回执不明确时进入 `uncertain`，可按 Issue ID 到群中核对。
 
 按 Issue ID 查看两个分支的状态（示例中的数字替换为实际 ID）：
 
 ```sql
 SELECT issue_id, project, status, task_id FROM feedback_jobs WHERE issue_id = '12345';
-SELECT issue_id, project, status, analysis_attempts, delivery_attempts, last_error, report
+SELECT issue_id, project, feedback_type, task_type, dataset_id, status, analysis_attempts, delivery_attempts, last_error, report
 FROM rca_jobs WHERE issue_id = '12345';
 ```
 
