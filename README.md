@@ -29,7 +29,9 @@ DINGTALK_WEBHOOK_URL=<群机器人的完整 HTTPS webhook>
 
 应用默认使用 `AGENTOS_APP_ID=200004`、`AGENTOS_USER_ID=sentry-adapter`，网关为 `https://prod-gateway-cloud.gwm-adas.com/armory-core/api/v1`。可用 `AGENTOS_BASE_URL` 覆盖网关地址。如果接入网关启用了 Bearer 鉴权，配置 `AGENTOS_BEARER_TOKEN`。机器人地址与 Bearer token 也支持通过对应的 `_FILE` 变量指定容器内的凭据文件。修改配置后重新创建适配器容器。
 
-适配器调用 `create_session` 为每次分析建立独立会话，通过 `chat_stream` 传入用户反馈类型、Issue ID、反馈链接和反馈事件本身的 Event ID。AgentOS 通过 Sentry MCP 读取对应 Issue 和 Event，再根据该类型返回结构化 JSON。平台异常沿用根因报告；数据问题使用 `feedback_summary.impact` 记录影响范围；其他反馈使用 `triage.suggested_category` 和 `triage.reason` 记录分流建议。历史 `bug`、`defect` 按平台异常处理。`feature_gap`、缺失或未知类型沿用建卡的人工分流规则，跳过 AI 分析。[Sentry Issue API](https://docs.sentry.io/api/events/retrieve-an-issue/) · [Issue Event API](https://docs.sentry.io/api/events/retrieve-an-issue-event/)
+适配器为每次分析建立独立的 AgentOS 会话，传入原始反馈类型、Sentry 项目、Issue、反馈链接和反馈事件 ID。反馈有明确的关联错误时，适配器按项目和关联错误 ID 读取该次异常，将精简的诊断信息交给 Agent。读取失败时仍传关联 ID，供 Agent 通过 Sentry MCP 回查。适配器的 Sentry token 需要能读取对应项目的事件，例如具有该项目的 `project:read` 权限。[Project Event API](https://docs.sentry.io/api/events/retrieve-an-event-for-a-project/)
+
+AgentOS 按原始反馈类型返回结构化 JSON。平台异常使用根因报告，数据问题使用 `feedback_summary.impact` 记录影响范围，其他反馈使用 `triage.suggested_category` 和 `triage.reason` 记录分流建议。历史 `bug`、`defect` 按平台异常处理。`feature_gap`、缺失或未知类型沿用建卡的人工分流规则，跳过 AI 分析。[Sentry Issue API](https://docs.sentry.io/api/events/retrieve-an-issue/) · [Issue Event API](https://docs.sentry.io/api/events/retrieve-an-issue-event/)
 
 完整 JSON 保存在 `rca_jobs.report`。状态为“分析完成”或“部分完成”、通过该类型字段校验且至少有一条带引用的观察时，适配器发送群消息。标题显示反馈类型，并在有值时显示品类和数据集；正文附分析状态、问题、该类型的研判结果、一条证据、下一步及 Sentry 链接。报告为“信息不足”“分析失败”或缺少证据时，作业进入 `needs_review`。
 

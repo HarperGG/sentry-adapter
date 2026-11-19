@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -35,6 +36,7 @@ type Feedback struct {
 	IsFeedback        bool
 	IssueID           string
 	EventID           string
+	AssociatedErrorID string
 	AttachmentEventID string
 	Project           string
 	Title             string
@@ -85,8 +87,8 @@ type eventResponse struct {
 	EventID  string                     `json:"eventID"`
 	Contexts map[string]json.RawMessage `json:"contexts"`
 	Tags     []struct {
-		Key   string `json:"key"`
-		Value string `json:"value"`
+		Key   string          `json:"key"`
+		Value json.RawMessage `json:"value"`
 	} `json:"tags"`
 }
 
@@ -112,11 +114,12 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 		eventID = event.ID
 	}
 	var details struct {
-		Message      string `json:"message"`
-		Name         string `json:"name"`
-		FeedbackType string `json:"feedback_type"`
-		Type         string `json:"type"`
-		URL          string `json:"url"`
+		AssociatedEventID string `json:"associated_event_id"`
+		Message           string `json:"message"`
+		Name              string `json:"name"`
+		FeedbackType      string `json:"feedback_type"`
+		Type              string `json:"type"`
+		URL               string `json:"url"`
 	}
 	if raw, ok := event.Contexts["feedback"]; ok {
 		_ = json.Unmarshal(raw, &details)
@@ -129,8 +132,9 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 		_ = json.Unmarshal(raw, &annotationTask)
 	}
 	var feedbackDetails struct {
-		DatasetID string `json:"dataset_id"`
-		TaskType  string `json:"task_type"`
+		AssociatedErrorID string `json:"associated_error_id"`
+		DatasetID         string `json:"dataset_id"`
+		TaskType          string `json:"task_type"`
 	}
 	if raw, ok := event.Contexts["feedback_details"]; ok {
 		_ = json.Unmarshal(raw, &feedbackDetails)
@@ -138,10 +142,17 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 	kind := ""
 	taskType := ""
 	datasetID := ""
+	associatedIDs := []string{details.AssociatedEventID, feedbackDetails.AssociatedErrorID}
 	sourceURL := strings.TrimSpace(details.URL)
 	for _, tag := range event.Tags {
-		value := strings.TrimSpace(tag.Value)
+		var value string
+		if err := json.Unmarshal(tag.Value, &value); err != nil {
+			continue
+		}
+		value = strings.TrimSpace(value)
 		switch tag.Key {
+		case "associated_event_id":
+			associatedIDs = append(associatedIDs, value)
 		case "feedback_type", "feedback.type":
 			if kind == "" {
 				kind = value
@@ -189,7 +200,8 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 	f := Feedback{
 		IsFeedback: true,
 		IssueID:    issueID, EventID: eventID, Project: issue.Project.Slug,
-		Title: issue.Title, Message: details.Message, Username: username, Kind: kind,
+		AssociatedErrorID: associatedErrorID(eventID, associatedIDs),
+		Title:             issue.Title, Message: details.Message, Username: username, Kind: kind,
 		TaskType: taskType, DatasetID: datasetID, CloudServer: cloudServerFromURL(sourceURL),
 		IssueURL: c.feedbackURL(org, issueID, issue.Project.Slug, issue.Project.ID, issue.Permalink),
 	}
@@ -197,6 +209,27 @@ func (c *Client) GetFeedback(ctx context.Context, org, issueID, preferredEventID
 		return Feedback{}, errors.New("Sentry event has no ID")
 	}
 	return f, nil
+}
+
+var eventIDFormat = regexp.MustCompile(`^(?:[[:xdigit:]]{32}|[[:xdigit:]]{8}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{4}-[[:xdigit:]]{12})$`)
+
+func normalizeEventID(raw string) string {
+	id := strings.TrimSpace(raw)
+	if !eventIDFormat.MatchString(id) {
+		return ""
+	}
+	return strings.ToLower(strings.ReplaceAll(id, "-", ""))
+}
+
+func associatedErrorID(feedbackID string, candidates []string) string {
+	self := normalizeEventID(feedbackID)
+	for _, candidate := range candidates {
+		id := normalizeEventID(candidate)
+		if id != "" && id != self && id != "00000000000000000000000000000000" {
+			return id
+		}
+	}
+	return ""
 }
 
 // Cloud routing follows the business page URL's server query parameter. Sentry's

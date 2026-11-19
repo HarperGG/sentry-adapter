@@ -58,13 +58,16 @@ func TestEvidenceForNotification(t *testing.T) {
 
 func TestAnalysisPromptFollowsVerifiedFeedbackType(t *testing.T) {
 	for kind, field := range map[string]string{"platform_bug": "root_cause", "data_issue": "feedback_summary.impact", "other": "triage.suggested_category"} {
-		message, err := analysisMessage("123", "https://sentry.example/issues/123/", "F1", kind)
+		message, err := analysisMessage("123", "https://sentry.example/issues/123/", "F1", kind, FeedbackSource{})
 		if err != nil || !strings.Contains(message, "feedback_type="+kind) || !strings.Contains(message, "反馈事件本身的 Event ID：F1") || !strings.Contains(message, field) {
 			t.Fatalf("incomplete %s task: %v", kind, err)
 		}
+		if strings.Contains(message, "\nassociated_event_id=") || !strings.Contains(message, "contexts.feedback_details.associated_error_id") {
+			t.Errorf("%s task without a stored association must check the original event", kind)
+		}
 	}
 	for _, kind := range []string{"suggestion", "", "unknown"} {
-		if _, err := analysisMessage("123", "", "", kind); err == nil {
+		if _, err := analysisMessage("123", "", "", kind, FeedbackSource{}); err == nil {
 			t.Fatalf("accepted analysis for %q", kind)
 		}
 	}

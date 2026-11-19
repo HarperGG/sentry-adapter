@@ -9,11 +9,12 @@ import (
 
 	"sentry-adapter/internal/agentos"
 	"sentry-adapter/internal/dingtalk"
+	"sentry-adapter/internal/sentry"
 	"sentry-adapter/internal/store"
 )
 
 type analyzer interface {
-	Analyze(context.Context, string, string, string, string) (json.RawMessage, error)
+	Analyze(context.Context, string, string, string, string, agentos.FeedbackSource) (json.RawMessage, error)
 }
 
 type robotSender interface {
@@ -23,6 +24,7 @@ type robotSender interface {
 type RCAWorker struct {
 	AllowedProjects []string
 	Store           *store.Store
+	Sentry          *sentry.Client
 	Agent           analyzer
 	Robot           robotSender
 	Logger          *slog.Logger
@@ -59,7 +61,15 @@ func (w *RCAWorker) Run(ctx context.Context) {
 
 func (w *RCAWorker) process(ctx context.Context, j store.RCAJob) error {
 	if j.Stage == store.RCAAnalyzing {
-		raw, err := w.Agent.Analyze(ctx, j.IssueID, j.IssueURL, j.EventID, j.FeedbackType)
+		source := agentos.FeedbackSource{Project: j.Project, AssociatedErrorID: j.AssociatedErrorID}
+		if j.AssociatedErrorID != "" && w.Sentry != nil {
+			observation, err := w.Sentry.GetErrorObservation(ctx, j.Organization, j.Project, j.AssociatedErrorID)
+			if err != nil {
+				w.Logger.Warn("read linked error for feedback analysis", "issue_id", j.IssueID, "event_id", j.AssociatedErrorID, "error", err)
+			}
+			source.Observation = observation
+		}
+		raw, err := w.Agent.Analyze(ctx, j.IssueID, j.IssueURL, j.EventID, j.FeedbackType, source)
 		finalCtx, finish := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 		defer finish()
 		if err != nil {

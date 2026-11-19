@@ -124,6 +124,57 @@ func TestGetFeedbackMetadataFallsBackToContextAndTag(t *testing.T) {
 	}
 }
 
+func TestGetFeedbackFindsExplicitAssociatedError(t *testing.T) {
+	const feedbackID = "f0a00001000000000000000000000001"
+	const linked = "20a10002000000000000000000000002"
+	const alternative = "30b20003000000000000000000000003"
+	for _, tc := range []struct {
+		name   string
+		native any
+		detail any
+		tag    any
+		want   string
+	}{
+		{"native context takes precedence", "20A10002-0000-0000-0000-000000000002", alternative, alternative, linked},
+		{"self reference falls back to details", "F0A00001-0000-0000-0000-000000000001", linked, alternative, linked},
+		{"malformed and empty contexts fall back to tag", map[string]bool{"invalid": true}, "", linked, linked},
+		{"reject mistyped, zero and self references", 12345, "00000000-0000-0000-0000-000000000000", feedbackID, ""},
+		{"reject malformed hyphens, nonhex and mistyped tag", "2-0a10002000000000000000000000002", "gggggggggggggggggggggggggggggggg", true, ""},
+		{"trace and replay alone supply no error", nil, nil, nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/api/0/organizations/acme/issues/42/":
+					_, _ = io.WriteString(w, `{"id":"42","issueCategory":"feedback","project":{"id":"5","slug":"web"}}`)
+				case "/api/0/organizations/acme/issues/42/events/oldest/":
+					_ = json.NewEncoder(w).Encode(map[string]any{
+						"eventID": feedbackID,
+						"contexts": map[string]any{
+							"feedback":         map[string]any{"associated_event_id": tc.native, "message": "打开失败"},
+							"feedback_details": map[string]any{"associated_error_id": tc.detail},
+							"trace":            map[string]string{"trace_id": linked},
+						},
+						"tags": []map[string]any{{"key": "associated_event_id", "value": tc.tag}, {"key": "replay_id", "value": alternative}},
+					})
+				default:
+					t.Errorf("unexpected request: %s", r.URL.Path)
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			client, err := New(server.URL, "test-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			f, err := client.GetFeedback(t.Context(), "acme", "42", "")
+			if err != nil || f.EventID != feedbackID || f.AssociatedErrorID != tc.want || f.Message != "打开失败" {
+				t.Fatalf("feedback=%+v err=%v, want associated error %q and original feedback", f, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestGetFeedbackIgnoresNonFeedbackIssue(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

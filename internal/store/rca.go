@@ -17,18 +17,19 @@ const (
 )
 
 type RCAJob struct {
-	ID           int64
-	Organization string
-	Project      string
-	IssueID      string
-	EventID      string
-	IssueURL     string
-	FeedbackType string
-	TaskType     string
-	DatasetID    string
-	Stage        string
-	Attempts     int
-	Report       json.RawMessage
+	ID                int64
+	Organization      string
+	Project           string
+	IssueID           string
+	EventID           string
+	AssociatedErrorID string
+	IssueURL          string
+	FeedbackType      string
+	TaskType          string
+	DatasetID         string
+	Stage             string
+	Attempts          int
+	Report            json.RawMessage
 }
 
 func (s *Store) migrateRCA(ctx context.Context) error {
@@ -58,7 +59,8 @@ ALTER TABLE rca_jobs
   ADD COLUMN IF NOT EXISTS feedback_type text NOT NULL DEFAULT 'platform_bug'
     CHECK (feedback_type IN ('platform_bug','data_issue','other')),
   ADD COLUMN IF NOT EXISTS task_type text NOT NULL DEFAULT '',
-  ADD COLUMN IF NOT EXISTS dataset_id text NOT NULL DEFAULT '';
+  ADD COLUMN IF NOT EXISTS dataset_id text NOT NULL DEFAULT '',
+  ADD COLUMN IF NOT EXISTS associated_error_id text NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS rca_jobs_ready_idx ON rca_jobs (next_attempt_at, id)
   WHERE status IN ('pending_analysis', 'pending_delivery');
 CREATE INDEX IF NOT EXISTS rca_jobs_lease_idx ON rca_jobs (lease_until)
@@ -72,10 +74,10 @@ func (s *Store) EnqueueRCA(ctx context.Context, j RCAJob) error {
 		return errors.New("missing RCA feedback identity or URL")
 	}
 	_, err := s.pool.Exec(ctx, `
-INSERT INTO rca_jobs (organization, project, issue_id, event_id, issue_url, feedback_type, task_type, dataset_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+INSERT INTO rca_jobs (organization, project, issue_id, event_id, associated_error_id, issue_url, feedback_type, task_type, dataset_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 ON CONFLICT (organization, project, issue_id) DO NOTHING`,
-		j.Organization, j.Project, j.IssueID, j.EventID, j.IssueURL, j.FeedbackType, j.TaskType, j.DatasetID)
+		j.Organization, j.Project, j.IssueID, j.EventID, j.AssociatedErrorID, j.IssueURL, j.FeedbackType, j.TaskType, j.DatasetID)
 	return err
 }
 
@@ -99,9 +101,9 @@ UPDATE rca_jobs j SET
   delivery_attempts = j.delivery_attempts + CASE j.status WHEN 'pending_delivery' THEN 1 ELSE 0 END,
   lease_until = now() + $1::double precision * interval '1 second', updated_at = now()
 FROM next_job WHERE j.id = next_job.id
-RETURNING j.id, j.organization, j.project, j.issue_id, j.event_id, j.issue_url, j.feedback_type, j.task_type, j.dataset_id, j.status,
+RETURNING j.id, j.organization, j.project, j.issue_id, j.event_id, j.associated_error_id, j.issue_url, j.feedback_type, j.task_type, j.dataset_id, j.status,
   CASE j.status WHEN 'analyzing' THEN j.analysis_attempts ELSE j.delivery_attempts END, j.report`,
-		lease.Seconds(), allowedProjects).Scan(&j.ID, &j.Organization, &j.Project, &j.IssueID, &j.EventID,
+		lease.Seconds(), allowedProjects).Scan(&j.ID, &j.Organization, &j.Project, &j.IssueID, &j.EventID, &j.AssociatedErrorID,
 		&j.IssueURL, &j.FeedbackType, &j.TaskType, &j.DatasetID, &j.Stage, &j.Attempts, &j.Report)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RCAJob{}, false, nil

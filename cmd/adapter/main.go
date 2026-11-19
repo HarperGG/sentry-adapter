@@ -104,7 +104,7 @@ func run(logger *slog.Logger) error {
 		if err != nil {
 			return err
 		}
-		rca := worker.RCAWorker{Store: db, Agent: agent, Robot: robot, AllowedProjects: cfg.RCAAllowedProjects, Logger: logger}
+		rca := worker.RCAWorker{Store: db, Sentry: sentryClient, Agent: agent, Robot: robot, AllowedProjects: cfg.RCAAllowedProjects, Logger: logger}
 		workers.Go(func() { rca.Run(ctx) })
 		logger.Info("platform feedback analysis enabled", "organization", cfg.SentryOrg, "app_id", cfg.AgentOSAppID, "allowed_projects", cfg.RCAAllowedProjects)
 	}

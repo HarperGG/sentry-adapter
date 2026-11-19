@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,10 @@ const (
 	integrationOrg             = "sentry"
 	integrationCardProject     = "anno-dev"
 	integrationAnalysisProject = "anno-seg-test"
+	integrationLinkedErrorID   = "1234567890abcdef1234567890abcdef"
+	integrationMissingErrorID  = "9876543210abcdef9876543210abcdef"
+	integrationFailureStage    = "open.resources"
+	integrationExceptionValue  = "获取相机配置文件失败"
 	integrationHookKey         = "local-test-signing-key"
 	integrationNextStep        = "核对保存请求的错误栈"
 	integrationDataImpact      = "用户报告第 3 至 5 帧缺失"
@@ -45,6 +50,7 @@ const (
 
 type integrationIssue struct {
 	id, project, projectID, cloud, environment, kind, problem string
+	linkedErrorID                                             string
 	wantCard, wantRCA                                         bool
 }
 
@@ -60,14 +66,14 @@ func TestSignedFeedbackRoutesRCAIndependentlyOfTeambitionProject(t *testing.T) {
 	otherIssue := integrationIssue{id: "51", project: integrationAnalysisProject, projectID: "8", kind: "other", problem: "希望能按帧批量选中", wantRCA: true}
 	issues := []integrationIssue{
 		{id: "42", project: integrationCardProject, projectID: "5", cloud: "TC", environment: "production", kind: "platform_bug", problem: "腾讯云保存失败", wantCard: true},
-		{id: "43", project: integrationAnalysisProject, projectID: "8", cloud: "HS", environment: "test", kind: "platform_bug", problem: "火山云保存失败", wantRCA: true},
+		{id: "43", project: integrationAnalysisProject, projectID: "8", cloud: "HS", environment: "test", kind: "platform_bug", problem: "火山云保存失败", linkedErrorID: integrationLinkedErrorID, wantRCA: true},
 		{id: "44", project: integrationCardProject, projectID: "5", cloud: "HS", environment: "production", kind: "data_issue", problem: "标注数据缺失", wantCard: true},
 		{id: "45", project: integrationAnalysisProject, projectID: "8", cloud: "TC", environment: "test", kind: "suggestion", problem: "增加批量保存入口"},
-		{id: "46", project: integrationAnalysisProject, projectID: "8", environment: "production", kind: "platform_bug", problem: "测试项目携带生产标签", wantRCA: true},
+		{id: "46", project: integrationAnalysisProject, projectID: "8", environment: "production", kind: "platform_bug", problem: "测试项目携带生产标签", linkedErrorID: integrationMissingErrorID, wantRCA: true},
 		{id: "47", project: integrationCardProject, projectID: "5", kind: "other", problem: "其他反馈", wantCard: true},
 		{id: "48", project: integrationCardProject, projectID: "5", cloud: "HS", environment: "test", kind: "platform_bug", problem: "线上项目携带测试标签", wantCard: true},
 		{id: "49", project: integrationAnalysisProject, projectID: "8", cloud: "TC", kind: "platform_bug", problem: "测试反馈缺少环境标签", wantRCA: true},
-		{id: "50", project: integrationAnalysisProject, projectID: "8", kind: "data_issue", problem: "第 3 至 5 帧的点云缺失", wantRCA: true},
+		{id: "50", project: integrationAnalysisProject, projectID: "8", kind: "data_issue", problem: "第 3 至 5 帧的点云缺失", linkedErrorID: integrationLinkedErrorID, wantRCA: true},
 		otherIssue,
 		{id: "52", project: integrationCardProject, projectID: "5", kind: "suggestion", problem: "希望新增快捷键", wantCard: true},
 		{id: "53", project: integrationAnalysisProject, projectID: "8", kind: "feature_gap", problem: "历史版本缺少入口"},
@@ -124,7 +130,7 @@ func TestSignedFeedbackRoutesRCAIndependentlyOfTeambitionProject(t *testing.T) {
 		Organization: integrationOrg, Project: integrationCardProject, RCAEnabled: true,
 		RCAAllowedProjects: cfg.RCAAllowedProjects, Logger: logger,
 	}
-	rcaWorker := worker.RCAWorker{Store: db, Agent: agent, Robot: messages, AllowedProjects: cfg.RCAAllowedProjects, Logger: logger}
+	rcaWorker := worker.RCAWorker{Store: db, Sentry: sentryClient, Agent: agent, Robot: messages, AllowedProjects: cfg.RCAAllowedProjects, Logger: logger}
 	workers.Go(func() { feedbackWorker.Run(ctx) })
 	workers.Go(func() { rcaWorker.Run(ctx) })
 	waitIntegrationJobs(t, sql, len(issues), expectedAnalyses)
@@ -172,7 +178,7 @@ func TestSignedFeedbackRoutesRCAIndependentlyOfTeambitionProject(t *testing.T) {
 func TestDisabledAnalysisStillCreatesFeedbackCards(t *testing.T) {
 	db, sql := openIntegrationStore(t)
 	issues := []integrationIssue{
-		{id: "61", project: integrationCardProject, projectID: "5", kind: "platform_bug", problem: "保存失败"},
+		{id: "61", project: integrationCardProject, projectID: "5", kind: "platform_bug", problem: "保存失败", linkedErrorID: integrationLinkedErrorID},
 		{id: "62", project: integrationCardProject, projectID: "5", kind: "data_issue", problem: "数据偏移"},
 		{id: "63", project: integrationCardProject, projectID: "5", kind: "other", problem: "工作流疑问"},
 		{id: "64", project: integrationCardProject, projectID: "5", kind: "suggestion", problem: "操作建议"},
@@ -285,7 +291,21 @@ func postIntegrationWebhook(t *testing.T, handler http.HandlerFunc, resource, bo
 
 func newIntegrationSentry(t *testing.T, issues []integrationIssue) *httptest.Server {
 	t.Helper()
+	var mu sync.Mutex
+	reads := make(map[string]int)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/0/projects/") {
+			mu.Lock()
+			reads[r.Method+" "+r.URL.Path]++
+			mu.Unlock()
+			if r.URL.Path == "/api/0/projects/"+integrationOrg+"/"+integrationAnalysisProject+"/events/"+integrationLinkedErrorID+"/" {
+				_, _ = fmt.Fprintf(w, `{"eventID":%q,"type":"error","tags":[{"key":"failure_stage","value":%q}],"entries":[{"type":"exception","data":{"values":[{"type":"CalibrationResourceError","value":%q}]}}],"user":{"email":"private-field@example.invalid"}}`,
+					integrationLinkedErrorID, integrationFailureStage, integrationExceptionValue+"（/test-bucket/input/cameras.cfg）: HTTP status 404")
+			} else {
+				http.NotFound(w, r)
+			}
+			return
+		}
 		for _, issue := range issues {
 			path := "/api/0/organizations/" + integrationOrg + "/issues/" + issue.id + "/"
 			switch r.URL.Path {
@@ -299,9 +319,15 @@ func newIntegrationSentry(t *testing.T, issues []integrationIssue) *httptest.Ser
 					businessURL += "?server=" + issue.cloud
 				}
 				tags := []map[string]string{{"key": "feedback_type", "value": issue.kind}, {"key": "task_type", "value": "OD"}, {"key": "dataset_id", "value": "dataset-" + issue.id}}
+				feedback := map[string]string{"message": issue.problem, "url": businessURL}
+				if issue.linkedErrorID != "" && issue.kind == "data_issue" {
+					tags = append(tags, map[string]string{"key": "associated_event_id", "value": issue.linkedErrorID})
+				} else if issue.linkedErrorID != "" {
+					feedback["associated_event_id"] = issue.linkedErrorID
+				}
 				event := map[string]any{
 					"eventID":  issue.eventID(),
-					"contexts": map[string]any{"feedback": map[string]string{"message": issue.problem, "url": businessURL}},
+					"contexts": map[string]any{"feedback": feedback},
 				}
 				if issue.environment != "" {
 					event["environment"] = issue.environment
@@ -317,7 +343,18 @@ func newIntegrationSentry(t *testing.T, issues []integrationIssue) *httptest.Ser
 		t.Errorf("unexpected Sentry request: %s", r.URL.Path)
 		http.NotFound(w, r)
 	}))
-	t.Cleanup(server.Close)
+	t.Cleanup(func() {
+		server.Close()
+		want := make(map[string]int)
+		for _, issue := range issues {
+			if issue.wantRCA && issue.linkedErrorID != "" {
+				want["GET /api/0/projects/"+integrationOrg+"/"+issue.project+"/events/"+issue.linkedErrorID+"/"]++
+			}
+		}
+		if !reflect.DeepEqual(reads, want) {
+			t.Errorf("project event lookups = %v, want %v", reads, want)
+		}
+	})
 	return server
 }
 
@@ -342,22 +379,67 @@ func newIntegrationAgent(t *testing.T, issues []integrationIssue, sentryURL stri
 			requests <- req
 			for _, issue := range issues {
 				link := issue.link(sentryURL)
-				if issue.wantRCA && strings.Contains(req["message"], link) && strings.Contains(req["message"], issue.eventID()) {
-					if !strings.Contains(req["message"], "feedback_type="+issue.kind+"\n") {
-						t.Errorf("Issue %s did not request %s analysis", issue.id, issue.kind)
-					}
+				if issue.wantRCA && strings.Contains(req["message"], link) {
+					assertAgentEventReferences(t, issue, req["message"])
 					report := integrationAgentReport(t, issue, link)
 					w.Header().Set("Content-Type", "text/event-stream")
 					_, _ = fmt.Fprintf(w, "data: {\"type\":\"text\",\"content\":%s}\n\nevent:done\ndata:{\"type\":\"done\",\"reason\":\"completed\"}\n\n", jsonString(report))
 					return
 				}
 			}
-			t.Error("AgentOS analysis lost the Sentry link or exact event identity, or analyzed an excluded issue")
+			t.Error("AgentOS analysis lost the Sentry link or analyzed an excluded issue")
 		}
 		http.NotFound(w, r)
 	}))
 	t.Cleanup(server.Close)
 	return server, sessionCount
+}
+
+func assertAgentEventReferences(t *testing.T, issue integrationIssue, message string) {
+	t.Helper()
+	lines := "\n" + message + "\n"
+	for _, required := range []string{
+		"feedback_type=" + issue.kind,
+		"project_slug=" + issue.project,
+		"反馈事件本身的 Event ID：" + issue.eventID(),
+	} {
+		if !strings.Contains(lines, "\n"+required+"\n") {
+			t.Errorf("Issue %s AgentOS request missing %q", issue.id, required)
+		}
+	}
+	var linked, observations []string
+	for line := range strings.SplitSeq(message, "\n") {
+		if id, ok := strings.CutPrefix(line, "associated_event_id="); ok {
+			linked = append(linked, id)
+		}
+		if raw, ok := strings.CutPrefix(line, "linked_error_observation="); ok {
+			observations = append(observations, raw)
+		}
+	}
+	var expected []string
+	if issue.linkedErrorID != "" {
+		expected = []string{issue.linkedErrorID}
+	}
+	if !slices.Equal(linked, expected) {
+		t.Errorf("Issue %s associated errors in AgentOS request = %q, expected %q", issue.id, linked, expected)
+	}
+	if issue.linkedErrorID != integrationLinkedErrorID {
+		if len(observations) != 0 || strings.Contains(message, integrationExceptionValue) {
+			t.Errorf("Issue %s sent observations without reading a matching error", issue.id)
+		}
+		return
+	}
+	var observation map[string]any
+	if len(observations) != 1 || json.Unmarshal([]byte(observations[0]), &observation) != nil {
+		t.Errorf("Issue %s must send one JSON observation for its linked error", issue.id)
+		return
+	}
+	if observation["event_id"] != issue.linkedErrorID || observation["failure_stage"] != integrationFailureStage ||
+		observation["exception_type"] != "CalibrationResourceError" || observation["exception_value"] != integrationExceptionValue ||
+		observation["resource_file"] != "cameras.cfg" || observation["http_status"] != "404" ||
+		strings.Contains(message, "/test-bucket/input/") || strings.Contains(message, "private-field@example.invalid") {
+		t.Errorf("Issue %s did not send the scoped linked error diagnosis: %v", issue.id, observation)
+	}
 }
 
 func integrationAgentReport(t *testing.T, issue integrationIssue, link string) string {
@@ -502,12 +584,12 @@ func assertIntegrationIssue(t *testing.T, sql *pgxpool.Pool, rules *routing.Rule
 			t.Errorf("Issue %s lost triage recommendation: %+v", issue.id, message)
 		}
 	}
-	var project, eventID, storedIssue, cloud string
+	var project, eventID, linkedErrorID, storedIssue, cloud string
 	var analyses, deliveries int
-	err := sql.QueryRow(t.Context(), `SELECT project, event_id, status, report->>'issue_key', report->>'test_cloud', analysis_attempts, delivery_attempts FROM rca_jobs WHERE issue_id=$1`, issue.id).
-		Scan(&project, &eventID, &status, &storedIssue, &cloud, &analyses, &deliveries)
-	if err != nil || project != issue.project || eventID != issue.eventID() || status != "done" || storedIssue != issue.id || cloud != issue.cloud || analyses != 1 || deliveries != 1 {
-		t.Errorf("Issue %s RCA persistence mismatch: project=%q event=%q status=%q issue=%q cloud=%q attempts=%d/%d error=%v",
-			issue.id, project, eventID, status, storedIssue, cloud, analyses, deliveries, err)
+	err := sql.QueryRow(t.Context(), `SELECT project, event_id, associated_error_id, status, report->>'issue_key', report->>'test_cloud', analysis_attempts, delivery_attempts FROM rca_jobs WHERE issue_id=$1`, issue.id).
+		Scan(&project, &eventID, &linkedErrorID, &status, &storedIssue, &cloud, &analyses, &deliveries)
+	if err != nil || project != issue.project || eventID != issue.eventID() || linkedErrorID != issue.linkedErrorID || status != "done" || storedIssue != issue.id || cloud != issue.cloud || analyses != 1 || deliveries != 1 {
+		t.Errorf("Issue %s RCA persistence mismatch: project=%q event=%q associated error=%q status=%q issue=%q cloud=%q attempts=%d/%d error=%v",
+			issue.id, project, eventID, linkedErrorID, status, storedIssue, cloud, analyses, deliveries, err)
 	}
 }

@@ -84,7 +84,7 @@ func (w *Worker) process(ctx context.Context, j store.Job) {
 		(len(w.RCAAllowedProjects) == 0 || slices.Contains(w.RCAAllowedProjects, f.Project)) {
 		err := w.Store.EnqueueRCA(ctx, store.RCAJob{
 			Organization: w.Organization, Project: f.Project, IssueID: f.IssueID,
-			EventID: f.EventID, IssueURL: f.IssueURL, FeedbackType: decision.FeedbackType,
+			EventID: f.EventID, AssociatedErrorID: f.AssociatedErrorID, IssueURL: f.IssueURL, FeedbackType: decision.FeedbackType,
 			TaskType: f.TaskType, DatasetID: f.DatasetID,
 		})
 		if err != nil {

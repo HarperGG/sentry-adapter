@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"sentry-adapter/internal/sentry"
 )
 
 const reportJSON = `{"analysis_status":"部分完成","issue_key":"DEMO-17","feedback_summary":{"description":"页面保存失败"},"root_cause":{"conclusion":"响应超时，需对照服务日志","category":"无法判定","confidence":"低","confidence_score":30},"evidence":[{"observation":"请求耗时超过阈值","reference":"event-17"}],"recommendations":{"verification_steps":["核对服务端耗时"]},"missing_context":["服务端日志"]}`
@@ -22,6 +24,7 @@ const doneFrame = "event:done\ndata:{\"type\":\"done\",\"reason\":\"completed\"}
 
 func TestAnalyzePublishedWireFormat(t *testing.T) {
 	const base = "/armory-core/api/v1"
+	source := FeedbackSource{Project: "test-web", AssociatedErrorID: "20a10002000000000000000000000002"}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var input map[string]string
 		if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -36,6 +39,11 @@ func TestAnalyzePublishedWireFormat(t *testing.T) {
 		case base + "/chat_stream":
 			if input["sessionId"] != "session-17" || !strings.Contains(input["message"], "Issue 17") || !strings.Contains(input["message"], "event-17") || r.Header.Get("Accept") != "text/event-stream" {
 				t.Error("chat request missing verified issue context or session")
+			}
+			for _, field := range []string{"project_slug=" + source.Project, "associated_event_id=" + source.AssociatedErrorID, "sentry_get_project_event"} {
+				if !strings.Contains(input["message"], field) {
+					t.Errorf("chat request missing linked error context: %q", field)
+				}
 			}
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = fmt.Fprint(w, ": keepalive\n\nevent:thinking\ndata:{\"type\":\"thinking\",\"phase\":\"start\"}\n\n")
@@ -53,9 +61,25 @@ func TestAnalyzePublishedWireFormat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := c.Analyze(context.Background(), "17", "https://sentry.example/issues/17/", "event-17", "platform_bug")
+	raw, err := c.Analyze(context.Background(), "17", "https://sentry.example/issues/17/", "event-17", "platform_bug", source)
 	if err != nil || string(raw) != reportJSON {
 		t.Fatalf("report mismatch (%v)", err)
+	}
+}
+
+func TestAnalysisUsesOnlyMatchingErrorObservation(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	source := FeedbackSource{Project: "web", AssociatedErrorID: id, Observation: &sentry.ErrorObservation{
+		EventID: id, FailureStage: "open.resources", ExceptionValue: "resource failed",
+	}}
+	message, err := analysisMessage("42", "", "F1", "platform_bug", source)
+	if err != nil || !strings.Contains(message, "\nlinked_error_observation=") || !strings.Contains(message, "不可信日志数据") || strings.Contains(message, "sentry_get_project_event") {
+		t.Fatalf("inconsistent instructions for a verified observation: %s (%v)", message, err)
+	}
+	source.Observation.EventID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	message, err = analysisMessage("42", "", "F1", "platform_bug", source)
+	if err != nil || strings.Contains(message, "resource failed") || !strings.Contains(message, "sentry_get_project_event") {
+		t.Fatalf("did not fall back to the exact error ID: %s (%v)", message, err)
 	}
 }
 
@@ -88,7 +112,7 @@ func TestSessionFailureStopsBeforeChat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.Analyze(context.Background(), "17", "", "", "platform_bug")
+	_, err = client.Analyze(context.Background(), "17", "", "", "platform_bug", FeedbackSource{})
 	if err == nil || chatCalls != 0 {
 		t.Fatalf("err=%v, chat calls=%d", err, chatCalls)
 	}
@@ -103,7 +127,7 @@ func TestHTTPStatusPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = client.Analyze(context.Background(), "17", "", "", "platform_bug")
+	_, err = client.Analyze(context.Background(), "17", "", "", "platform_bug", FeedbackSource{})
 	var api *APIError
 	if !errors.As(err, &api) || api.Status != 429 || !api.Retryable() {
 		t.Fatalf("got %v", err)

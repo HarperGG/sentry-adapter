@@ -96,7 +96,7 @@ func TestRCAMigrationPreservesQueuedPlatformJobs(t *testing.T) {
 	s := newRCAStore(t)
 	// Rebuild the previous schema in this test's isolated namespace, with a
 	// job waiting in each stage at the moment of the upgrade.
-	runRCAQuery(t, s, "ALTER TABLE rca_jobs DROP COLUMN feedback_type, DROP COLUMN task_type, DROP COLUMN dataset_id")
+	runRCAQuery(t, s, "ALTER TABLE rca_jobs DROP COLUMN feedback_type, DROP COLUMN task_type, DROP COLUMN dataset_id, DROP COLUMN associated_error_id")
 	runRCAQuery(t, s, `INSERT INTO rca_jobs (organization, project, issue_id, issue_url, status, report)
 		VALUES ('org','web','1','https://example.test/issues/1','pending_analysis',null),
 		       ('org','web','2','https://example.test/issues/2','pending_delivery','{"issue_key":"old-report"}')`)
@@ -109,7 +109,7 @@ func TestRCAMigrationPreservesQueuedPlatformJobs(t *testing.T) {
 		t.Fatalf("upgrade lost legacy jobs: analysis=%+v delivery=%+v", analysis, delivery)
 	}
 	for _, j := range []RCAJob{analysis, delivery} {
-		if j.FeedbackType != "platform_bug" || j.TaskType != "" || j.DatasetID != "" {
+		if j.FeedbackType != "platform_bug" || j.TaskType != "" || j.DatasetID != "" || j.AssociatedErrorID != "" {
 			t.Fatalf("unexpected metadata after upgrade: %+v", j)
 		}
 	}
@@ -158,7 +158,8 @@ func TestRCAStoredReportSurvivesDeliveryRetry(t *testing.T) {
 	s := newRCAStore(t)
 	ctx := t.Context()
 	job := RCAJob{Organization: "test", Project: "web", IssueID: "42", IssueURL: "https://example.test/issues/42",
-		FeedbackType: "data_issue", TaskType: "Driving_Lane", DatasetID: "573124"}
+		FeedbackType: "data_issue", TaskType: "Driving_Lane", DatasetID: "573124",
+		EventID: "f0a00001000000000000000000000001", AssociatedErrorID: "20a10002000000000000000000000002"}
 	if err := s.EnqueueRCA(ctx, job); err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +179,8 @@ func TestRCAStoredReportSurvivesDeliveryRetry(t *testing.T) {
 	runRCAQuery(t, s, "UPDATE rca_jobs SET next_attempt_at=now() WHERE id=$1", delivery.ID)
 	next := claimStage(t, s, RCADelivering, 2)
 	for _, claimed := range []RCAJob{analysis, delivery, next} {
-		if claimed.FeedbackType != job.FeedbackType || claimed.TaskType != job.TaskType || claimed.DatasetID != job.DatasetID {
+		if claimed.FeedbackType != job.FeedbackType || claimed.TaskType != job.TaskType || claimed.DatasetID != job.DatasetID ||
+			claimed.EventID != job.EventID || claimed.AssociatedErrorID != job.AssociatedErrorID {
 			t.Fatalf("claim lost original feedback metadata: %+v", claimed)
 		}
 	}
